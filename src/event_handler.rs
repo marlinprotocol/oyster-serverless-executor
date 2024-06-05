@@ -3,6 +3,7 @@ use ethers::abi::{decode, ParamType};
 use ethers::providers::{Middleware, StreamExt};
 use ethers::types::{BigEndianHash, Filter, Log, H256, U64};
 use ethers::utils::keccak256;
+use log::info;
 use scopeguard::defer;
 use tokio::select;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -209,6 +210,8 @@ pub async fn handle_event_logs(
                     == keccak256("JobCreated(uint256,address,bytes32,bytes,uint256,address[])")
                     .into()
                 {
+                    info!("Job Created event received");
+
                     // Decode the event parameters using the ABI information
                     let event_tokens = decode(
                         &vec![
@@ -304,6 +307,8 @@ pub async fn handle_event_logs(
                 else if event.topics[0]
                     == keccak256("JobResponded(uint256,bytes,uint256,uint8,uint8)").into()
                 {
+                    info!("Job Responded event received");
+
                     let job_id = event.topics[1].into_uint();
 
                     // Decode the event parameters using the ABI information

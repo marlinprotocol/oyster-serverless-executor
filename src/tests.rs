@@ -63,6 +63,7 @@ pub mod serverless_executor_test {
             num_selected_executors: 1,
             enclave_address: signer_verifier_address,
             enclave_signer: signer,
+            job_panic: false,
             immutable_params_injected: false.into(),
             mutable_params_injected: false.into(),
             enclave_registered: false.into(),

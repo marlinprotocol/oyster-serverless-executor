@@ -4,10 +4,12 @@ use actix_web::web::Data;
 use actix_web::{App, HttpServer};
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
+use env_logger::Env;
 use ethers::providers::{Provider, Ws};
 use ethers::types::{Address, H160, U64};
 use ethers::utils::public_key_to_address;
 use k256::ecdsa::SigningKey;
+use log::info;
 use tokio::fs;
 
 use serverless::cgroups::Cgroups;
@@ -24,40 +26,65 @@ struct Args {
     #[clap(long, value_parser, default_value = "6001")]
     port: u16,
 
-    #[clap(long, value_parser, default_value = "./runtime/")]
+    #[clap(long, value_parser, default_value = "./runtime1/")]
     workerd_runtime_path: String,
 
-    #[clap(long, value_parser, default_value = "1")]
+    #[clap(long, value_parser, default_value = "421614")]
     common_chain_id: u64,
 
-    #[clap(long, value_parser, default_value = "")]
+    #[clap(
+        long,
+        value_parser,
+        default_value = "https://sepolia-rollup.arbitrum.io/rpc"
+    )]
     http_rpc_url: String,
 
-    #[clap(long, value_parser, default_value = "")]
+    #[clap(
+        long,
+        value_parser,
+        default_value = "wss://arbitrum-sepolia.infura.io/ws/v3/cd72f20b9fd544f8a5b8da706441e01c"
+    )]
     web_socket_url: String,
 
-    #[clap(long, value_parser, default_value = "")]
+    #[clap(
+        long,
+        value_parser,
+        default_value = "0xc58Ffc9bfCc846E56Eeb9AaE5aBFAD00393a19C5"
+    )]
     executors_contract_addr: String,
 
-    #[clap(long, value_parser, default_value = "")]
+    #[clap(
+        long,
+        value_parser,
+        default_value = "0xaba049A974a331A3b450FB8263710Ad140f64E4F"
+    )]
     jobs_contract_addr: String,
 
-    #[clap(long, value_parser, default_value = "")]
+    #[clap(
+        long,
+        value_parser,
+        default_value = "0x44fe06d2940b8782a0a9a9ffd09c65852c0156b1"
+    )]
     code_contract_addr: String,
 
-    #[clap(long, value_parser, default_value = "/app/id.sec")]
+    #[clap(long, value_parser, default_value = "id.sec")]
     enclave_signer_file: String,
 
-    #[clap(long, value_parser, default_value = "10")]
+    #[clap(long, value_parser, default_value = "60")]
     execution_buffer_time: u64, // time in seconds
 
-    #[clap(long, value_parser, default_value = "1")]
+    #[clap(long, value_parser, default_value = "3")]
     num_selected_executors: u8,
+
+    #[clap(long, value_parser, default_value = "false")]
+    job_panic: bool,
 }
 
 #[tokio::main]
 // Program to run the executor
 async fn main() -> Result<()> {
+    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
+
     let cli = Args::parse();
 
     // Initialize the 'cgroups' available inside the enclave to execute user code
@@ -76,6 +103,8 @@ async fn main() -> Result<()> {
     .context("Invalid enclave signer key")?;
 
     let enclave_address = public_key_to_address(&enclave_signer_key.verifying_key());
+
+    info!("Enclave Address: {:?}", enclave_address);
 
     // Connect to the rpc web socket provider
     let web_socket_client = Provider::<Ws>::connect_with_reconnects(cli.web_socket_url, 5)
@@ -103,6 +132,7 @@ async fn main() -> Result<()> {
         num_selected_executors: cli.num_selected_executors,
         enclave_address: enclave_address,
         enclave_signer: enclave_signer_key,
+        job_panic: cli.job_panic,
         immutable_params_injected: false.into(),
         mutable_params_injected: false.into(),
         enclave_registered: false.into(),

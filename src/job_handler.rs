@@ -32,6 +32,10 @@ pub async fn handle_job(
     app_state: Data<AppState>,
     tx: Sender<JobResponse>,
 ) {
+    if app_state.job_panic {
+        return;
+    }
+
     let slug = &hex::encode(rand::random::<u32>().to_ne_bytes());
 
     // Execute the job request under the specified user deadline

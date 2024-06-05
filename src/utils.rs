@@ -9,6 +9,7 @@ use ethers::providers::{Http, Provider, Ws};
 use ethers::signers::LocalWallet;
 use ethers::types::{Address, TransactionReceipt, H160, U256, U64};
 use k256::ecdsa::SigningKey;
+use log::info;
 use serde::{Deserialize, Serialize};
 
 use crate::cgroups::Cgroups;
@@ -38,6 +39,7 @@ pub struct AppState {
     pub num_selected_executors: u8,
     pub enclave_address: H160,
     pub enclave_signer: SigningKey,
+    pub job_panic: bool,
     pub immutable_params_injected: Mutex<bool>,
     pub mutable_params_injected: Mutex<bool>,
     pub enclave_registered: Mutex<bool>,
@@ -86,6 +88,10 @@ pub async fn send_txn(
     let pending_txn = txn
         .send()
         .await
+        .map_err(|err| {
+            info!("{err:?}");
+            err
+        })
         .context("Failed to send the transaction to the network")?;
 
     let txn_hash = pending_txn.tx_hash();

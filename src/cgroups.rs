@@ -36,7 +36,8 @@ impl Cgroups {
         cgroup: &str,
         args: impl IntoIterator<Item = impl AsRef<OsStr>>,
     ) -> Result<Child> {
-        let child = Command::new("cgexec")
+        let child = Command::new("sudo")
+            .arg("cgexec")
             .arg("-g")
             .arg("memory,cpu:".to_string() + cgroup)
             .args(args)
