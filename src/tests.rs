@@ -50,8 +50,9 @@ pub mod serverless_executor_test {
         let signer_verifier_address = public_key_to_address(signer.verifying_key());
 
         Data::new(AppState {
+            instance: 1,
             job_capacity: 20,
-            cgroups: Cgroups::new().unwrap().into(),
+            cgroups: Cgroups::new("workerd_").unwrap().into(),
             workerd_runtime_path: "./runtime/".to_owned(),
             execution_buffer_time: 10,
             common_chain_id: CHAIN_ID,

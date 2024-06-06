@@ -4,7 +4,7 @@ use serverless::cgroups;
 
 // Program to retrieve information about the 'cgroups' available inside the enclave currently
 fn main() -> Result<(), Box<dyn Error>> {
-    let cgroups = cgroups::Cgroups::new()?;
+    let cgroups = cgroups::Cgroups::new("workerd_")?;
     println!("{:?}", cgroups.free);
 
     Ok(())

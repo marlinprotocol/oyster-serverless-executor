@@ -151,7 +151,11 @@ async fn execute_job(
     }
 
     // Get free port for the 'cgroup'
-    let Ok(port) = workerd::get_port(&cgroup) else {
+    let Ok(port) = workerd::get_port(if app_state.instance == 1 {
+        &cgroup[8..]
+    } else {
+        &cgroup[9..]
+    }) else {
         return None;
     };
 

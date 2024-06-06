@@ -2,7 +2,7 @@
 
 set -e
 
-for i in $(seq 1 20)
+for i in $(seq 1 10)
 do
   cgcreate -g memory,cpu:workerd_$i
   echo 100M > /sys/fs/cgroup/workerd_$i/memory.max

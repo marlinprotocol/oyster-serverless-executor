@@ -11,9 +11,9 @@ pub struct Cgroups {
 }
 
 impl Cgroups {
-    pub fn new() -> Result<Cgroups> {
+    pub fn new(prefix: &str) -> Result<Cgroups> {
         Ok(Cgroups {
-            free: get_cgroups()?,
+            free: get_cgroups(prefix)?,
         })
     }
 
@@ -49,14 +49,14 @@ impl Cgroups {
 }
 
 // Retrieve the names of the 'cgroups' generated inside the enclave to host user code for execution by workerd runtime
-fn get_cgroups() -> Result<Vec<String>> {
+fn get_cgroups(prefix: &str) -> Result<Vec<String>> {
     Ok(fs::read_dir("/sys/fs/cgroup")
         .context("Failed to read the directory /sys/fs/cgroup")?
         .filter_map(|dir| {
             dir.ok().and_then(|dir| {
                 dir.path().file_name().and_then(|name| {
                     name.to_str().and_then(|x| {
-                        if x.starts_with("workerd_") {
+                        if x.starts_with(prefix) {
                             Some(x.to_owned())
                         } else {
                             None

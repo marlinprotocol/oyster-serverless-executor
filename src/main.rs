@@ -23,6 +23,9 @@ use serverless::utils::AppState;
 #[command(author, version, about, long_about = None)]
 struct Args {
     //  TODO: ADD DEFAULT CONFIGURATIONS
+    #[clap(long, value_parser, default_value = "1")]
+    instance: u8,
+
     #[clap(long, value_parser, default_value = "6001")]
     port: u16,
 
@@ -88,7 +91,11 @@ async fn main() -> Result<()> {
     let cli = Args::parse();
 
     // Initialize the 'cgroups' available inside the enclave to execute user code
-    let cgroups = Cgroups::new().context("Failed to retrieve cgroups")?;
+    let mut prefix = "workerd_";
+    if cli.instance != 1 {
+        prefix = "workerd1_";
+    }
+    let cgroups = Cgroups::new(&prefix).context("Failed to retrieve cgroups")?;
     if cgroups.free.is_empty() {
         return Err(anyhow!("No cgroups found, make sure you have generated cgroups on your system using the instructions in the readme"));
     }
@@ -113,6 +120,7 @@ async fn main() -> Result<()> {
 
     // Initialize App data that will be shared across multiple threads and tasks
     let app_data = Data::new(AppState {
+        instance: cli.instance,
         job_capacity: cgroups.free.len(),
         cgroups: cgroups.into(),
         workerd_runtime_path: cli.workerd_runtime_path,

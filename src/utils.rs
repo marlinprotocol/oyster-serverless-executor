@@ -26,6 +26,7 @@ pub type HttpSignerProvider = NonceManagerMiddleware<SignerMiddleware<Provider<H
 // App data struct containing the necessary fields to run the executor
 #[derive(Debug)]
 pub struct AppState {
+    pub instance: u8,
     pub cgroups: Mutex<Cgroups>,
     pub job_capacity: usize,
     pub workerd_runtime_path: String,

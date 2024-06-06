@@ -167,7 +167,7 @@ const oysterWorker :Workerd.Worker = (
 
 // Get a free port number for the cgroup exposing the user code
 pub fn get_port(cgroup: &str) -> Result<u16, ServerlessError> {
-    u16::from_str_radix(&cgroup[8..], 10)
+    u16::from_str_radix(&cgroup, 10)
         .map(|x| x + 11000)
         .map_err(|err| {
             eprintln!(
