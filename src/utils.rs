@@ -15,6 +15,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::cgroups::Cgroups;
 
+// Fixed buffer to add to the estimated gas for setting gas limit
+const GAS_LIMIT_BUFFER: u64 = 200000;
+
 // Generate type-safe ABI bindings for the Jobs contract at compile time
 abigen!(
     Jobs,
@@ -89,7 +92,7 @@ pub async fn send_txn(
         .estimate_gas()
         .await
         .context("Failed to estimate gas from the rpc")?;
-    let txn = txn.gas(estimated_gas + 200000);
+    let txn = txn.gas(estimated_gas + GAS_LIMIT_BUFFER);
 
     let pending_txn = txn
         .send()
