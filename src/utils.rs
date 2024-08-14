@@ -85,6 +85,12 @@ pub struct ExecutionResponse {
 pub async fn send_txn(
     txn: FunctionCall<Arc<HttpSignerProvider>, HttpSignerProvider, ()>,
 ) -> Result<TransactionReceipt> {
+    let estimated_gas = txn
+        .estimate_gas()
+        .await
+        .context("Failed to estimate gas from the rpc")?;
+    let txn = txn.gas(estimated_gas + 200000);
+
     let pending_txn = txn
         .send()
         .await
