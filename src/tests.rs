@@ -41,8 +41,7 @@ pub mod serverless_executor_test {
 
     // Testnet or Local blockchain (Hardhat) configurations
     const CHAIN_ID: u64 = 421614;
-    const HTTP_RPC_URL: &str =
-        "https://arb-sepolia.g.alchemy.com/v2/U8uYtmU3xK9j7HEZ74riWfj3C4ode7n1";
+    const HTTP_RPC_URL: &str = "https://sepolia-rollup.arbitrum.io/rpc";
     const WS_URL: &str = "wss://arb-sepolia.g.alchemy.com/v2/U8uYtmU3xK9j7HEZ74riWfj3C4ode7n1";
     const EXECUTORS_CONTRACT_ADDR: &str = "0xE35E287DBC371561E198bFaCBdbEc9cF78bDe930";
     const JOBS_CONTRACT_ADDR: &str = "0xd3b682f6F58323EC77dEaE730733C6A83a1561Fd";
@@ -1085,7 +1084,7 @@ pub mod serverless_executor_test {
     // Test ExecutorDeregistered event handling
     async fn executor_deregistered_test() {
         let app_state = generate_app_state().await;
-        app_state.enclave_registered.store(true, Ordering::Relaxed);
+        app_state.enclave_registered.store(true, Ordering::SeqCst);
 
         let (tx, mut rx) = channel::<JobResponse>(10);
 
@@ -1120,7 +1119,7 @@ pub mod serverless_executor_test {
         }
 
         assert!(
-            !app_state_clone.enclave_registered.load(Ordering::Relaxed),
+            !app_state_clone.enclave_registered.load(Ordering::SeqCst),
             "Enclave not set to deregistered in the app_state!"
         );
     }

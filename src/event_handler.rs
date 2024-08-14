@@ -8,6 +8,8 @@ use ethers::utils::keccak256;
 use scopeguard::defer;
 use tokio::select;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio_retry::strategy::{jitter, ExponentialBackoff};
+use tokio_retry::RetryIf;
 use tokio_stream::Stream;
 
 use crate::job_handler::handle_job;
@@ -33,7 +35,7 @@ pub async fn events_listener(app_state: Data<AppState>, starting_block: U64) {
                 }
             };
 
-        if !app_state.enclave_registered.load(Ordering::Relaxed) {
+        if !app_state.enclave_registered.load(Ordering::SeqCst) {
             // Create filter to listen to the 'ExecutorRegistered' event emitted by the Executors contract
             let register_executor_filter = Filter::new()
                 .address(app_state.executors_contract_addr)
@@ -65,15 +67,15 @@ pub async fn events_listener(app_state: Data<AppState>, starting_block: U64) {
                     continue;
                 }
 
-                app_state.enclave_registered.store(true, Ordering::Relaxed);
+                app_state.enclave_registered.store(true, Ordering::SeqCst);
                 app_state.last_block_seen.store(
                     event.block_number.unwrap_or(starting_block).as_u64(),
-                    Ordering::Relaxed,
+                    Ordering::SeqCst,
                 );
                 break;
             }
 
-            if !app_state.enclave_registered.load(Ordering::Relaxed) {
+            if !app_state.enclave_registered.load(Ordering::SeqCst) {
                 continue;
             }
         }
@@ -86,7 +88,7 @@ pub async fn events_listener(app_state: Data<AppState>, starting_block: U64) {
                 keccak256("JobCreated(uint256,address,bytes32,bytes,uint256,address[])"),
                 keccak256("JobResponded(uint256,bytes,uint256,uint8,uint8)"),
             ])
-            .from_block(app_state.last_block_seen.load(Ordering::Relaxed));
+            .from_block(app_state.last_block_seen.load(Ordering::SeqCst));
         // Subscribe to the jobs filter through the rpc web socket client
         let jobs_stream = match web_socket_client.subscribe_logs(&jobs_event_filter).await {
             Ok(stream) => stream,
@@ -106,7 +108,7 @@ pub async fn events_listener(app_state: Data<AppState>, starting_block: U64) {
             .address(app_state.executors_contract_addr)
             .topic0(H256::from(keccak256("ExecutorDeregistered(address)")))
             .topic1(H256::from(app_state.enclave_address))
-            .from_block(app_state.last_block_seen.load(Ordering::Relaxed));
+            .from_block(app_state.last_block_seen.load(Ordering::SeqCst));
         // Subscribe to the executors filter through the rpc web socket client
         let executors_stream = match web_socket_client
             .subscribe_logs(&executors_event_filter)
@@ -133,7 +135,7 @@ pub async fn events_listener(app_state: Data<AppState>, starting_block: U64) {
         });
 
         handle_event_logs(jobs_stream, executors_stream, app_state.clone(), tx).await;
-        if !app_state.enclave_registered.load(Ordering::Relaxed) {
+        if !app_state.enclave_registered.load(Ordering::SeqCst) {
             return;
         }
     }
@@ -147,17 +149,26 @@ async fn send_execution_output(app_state: Data<AppState>, mut rx: Receiver<JobRe
                 continue;
             };
 
-            // Prepare the execution timeout transaction to be send to the jobs contract
-            let txn = Jobs::new(
-                app_state.jobs_contract_addr,
-                app_state.http_rpc_client.lock().unwrap().clone().unwrap(),
-            )
-            .slash_on_execution_timeout(job_id);
+            let txn_result = RetryIf::spawn(
+                ExponentialBackoff::from_millis(5).map(jitter).take(3),
+                || async {
+                    // Prepare the execution timeout transaction to be send to the jobs contract
+                    let txn = Jobs::new(
+                        app_state.jobs_contract_addr,
+                        app_state.http_rpc_client.lock().unwrap().clone().unwrap(),
+                    )
+                    .slash_on_execution_timeout(job_id);
 
-            let txn_result = send_txn(txn).await;
+                    send_txn(txn).await
+                },
+                should_retry,
+            )
+            .await;
+
             let Ok(_) = txn_result else {
                 eprintln!(
-                    "Failed to submit the execution timeout transaction: {:?}",
+                    "Failed to submit the execution timeout transaction for job id {}: {:?}",
+                    job_id,
                     txn_result.unwrap_err()
                 );
                 continue;
@@ -166,24 +177,33 @@ async fn send_execution_output(app_state: Data<AppState>, mut rx: Receiver<JobRe
             continue;
         };
 
-        // Prepare the execution output transaction to be send to the jobs contract
-        let txn = Jobs::new(
-            app_state.jobs_contract_addr,
-            app_state.http_rpc_client.lock().unwrap().clone().unwrap(),
-        )
-        .submit_output(
-            job_output.signature.into(),
-            job_output.id,
-            job_output.execution_response.output.into(),
-            job_output.execution_response.total_time.into(),
-            job_output.execution_response.error_code.into(),
-            job_output.sign_timestamp,
-        );
+        let txn_result = RetryIf::spawn(
+            ExponentialBackoff::from_millis(5).map(jitter).take(3),
+            || async {
+                // Prepare the execution output transaction to be send to the jobs contract
+                let txn = Jobs::new(
+                    app_state.jobs_contract_addr,
+                    app_state.http_rpc_client.lock().unwrap().clone().unwrap(),
+                )
+                .submit_output(
+                    job_output.signature.clone().into(),
+                    job_output.id,
+                    job_output.execution_response.output.clone().into(),
+                    job_output.execution_response.total_time.into(),
+                    job_output.execution_response.error_code.into(),
+                    job_output.sign_timestamp,
+                );
 
-        let txn_result = send_txn(txn).await;
+                send_txn(txn).await
+            },
+            should_retry,
+        )
+        .await;
+
         let Ok(_) = txn_result else {
             eprintln!(
-                "Failed to submit the execution output transaction: {:?}",
+                "Failed to submit the execution output transaction for job id {}: {:?}",
+                job_output.id,
                 txn_result.unwrap_err()
             );
             continue;
@@ -212,7 +232,7 @@ pub async fn handle_event_logs(
 
                 // Capture the Executor deregistered event emitted by the executors contract
                 println!("Enclave deregistered from the common chain!");
-                app_state.enclave_registered.store(false, Ordering::Relaxed);
+                app_state.enclave_registered.store(false, Ordering::SeqCst);
 
                 println!("Stopped listening to job events!");
                 return;
@@ -226,16 +246,19 @@ pub async fn handle_event_logs(
                     continue;
                 };
 
-                if current_block.as_u64() < app_state.last_block_seen.load(Ordering::Relaxed) {
+                if current_block.as_u64() < app_state.last_block_seen.load(Ordering::SeqCst) {
                     continue;
                 }
-                app_state.last_block_seen.store(current_block.as_u64(), Ordering::Relaxed);
+                app_state.last_block_seen.store(current_block.as_u64(), Ordering::SeqCst);
 
                 // Capture the Job created event emitted by the jobs contract
                 if event.topics[0]
                     == keccak256("JobCreated(uint256,address,bytes32,bytes,uint256,address[])")
                     .into()
                 {
+                    // Extract the 'indexed' parameter of the event
+                    let job_id = event.topics[1].into_uint();
+
                     // Decode the event parameters using the ABI information
                     let event_tokens = decode(
                         &vec![
@@ -248,40 +271,41 @@ pub async fn handle_event_logs(
                     );
                     let Ok(event_tokens) = event_tokens else {
                         eprintln!(
-                            "Failed to decode 'JobCreated' event data {}: {:?}",
-                            event.data,
+                            "Failed to decode 'JobCreated' event data for job id {}: {:?}",
+                            job_id,
                             event_tokens.unwrap_err()
                         );
                         continue;
                     };
 
-                    // Extract the 'indexed' parameter of the event
-                    let job_id = event.topics[1].into_uint();
-
                     let Some(code_hash) = event_tokens[0].clone().into_fixed_bytes() else {
                         eprintln!(
-                            "Failed to decode codeHash token from the 'JobCreated' event data: {:?}",
+                            "Failed to decode codeHash token from the 'JobCreated' event data for job id {}: {:?}",
+                            job_id,
                             event_tokens[0]
                         );
                         continue;
                     };
                     let Some(code_inputs) = event_tokens[1].clone().into_bytes() else {
                         eprintln!(
-                            "Failed to decode codeInputs token from the 'JobCreated' event data: {:?}",
+                            "Failed to decode codeInputs token from the 'JobCreated' event data for job id {}: {:?}",
+                            job_id,
                             event_tokens[1]
                         );
                         continue;
                     };
                     let Some(user_deadline) = event_tokens[2].clone().into_uint() else {
                         eprintln!(
-                            "Failed to decode deadline token from the 'JobCreated' event data: {:?}",
+                            "Failed to decode deadline token from the 'JobCreated' event data for job id {}: {:?}",
+                            job_id,
                             event_tokens[2]
                         );
                         continue;
                     };
                     let Some(selected_nodes) = event_tokens[3].clone().into_array() else {
                         eprintln!(
-                            "Failed to decode selectedExecutors token from the 'JobCreated' event data: {:?}",
+                            "Failed to decode selectedExecutors token from the 'JobCreated' event data for job id {}: {:?}",
+                            job_id,
                             event_tokens[3]
                         );
                         continue;
@@ -345,8 +369,8 @@ pub async fn handle_event_logs(
                     );
                     let Ok(event_tokens) = event_tokens else {
                         eprintln!(
-                            "Failed to decode 'JobResponded' event data {}: {:?}",
-                            event.data,
+                            "Failed to decode 'JobResponded' event data for job id {}: {:?}",
+                            job_id,
                             event_tokens.unwrap_err()
                         );
                         continue;
@@ -354,7 +378,8 @@ pub async fn handle_event_logs(
 
                     let Some(output_count) = event_tokens[3].clone().into_uint() else {
                         eprintln!(
-                            "Failed to decode outputCount token from the 'JobResponded' event data: {:?}",
+                            "Failed to decode outputCount token from the 'JobResponded' event data for job id {}: {:?}",
+                            job_id,
                             event_tokens[3]
                         );
                         continue;
@@ -375,4 +400,14 @@ pub async fn handle_event_logs(
     }
 
     println!("Both the Jobs and Executors subscription streams have ended!");
+}
+
+// Retry a transaction if nonce issues occur
+fn should_retry(error: &anyhow::Error) -> bool {
+    let error_string = format!("{:?}", error);
+    if error_string.contains("code: -32000") && error_string.contains("nonce") {
+        return true;
+    }
+
+    false
 }

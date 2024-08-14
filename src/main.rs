@@ -36,7 +36,7 @@ struct Args {
     #[clap(
         long,
         value_parser,
-        default_value = "https://arb-sepolia.g.alchemy.com/v2/U8uYtmU3xK9j7HEZ74riWfj3C4ode7n1"
+        default_value = "https://sepolia-rollup.arbitrum.io/rpc"
     )]
     http_rpc_url: String,
 
