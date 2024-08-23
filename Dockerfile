@@ -53,5 +53,8 @@ COPY supervisord.conf /etc/supervisord.conf
 COPY target/x86_64-unknown-linux-musl/release/oyster-serverless-executor ./
 RUN chmod +x oyster-serverless-executor
 
+# oyster serverless executor config file
+COPY ./oyster_serverless_executor_config.json ./
+
 # Entry point
 ENTRYPOINT [ "/app/setup.sh" ]

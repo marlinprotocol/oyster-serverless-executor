@@ -27,6 +27,25 @@ abigen!(
 
 pub type HttpSignerProvider = NonceManagerMiddleware<SignerMiddleware<Provider<Http>, LocalWallet>>;
 
+pub struct ConfigManager {
+    pub path: String,
+}
+
+// Config struct containing the executor configuration parameters
+#[derive(Debug, Deserialize)]
+pub struct Config {
+    pub workerd_runtime_path: String,
+    pub common_chain_id: u64,
+    pub http_rpc_url: String,
+    pub web_socket_url: String,
+    pub executors_contract_addr: H160,
+    pub jobs_contract_addr: H160,
+    pub code_contract_addr: String,
+    pub enclave_signer_file: String,
+    pub execution_buffer_time: u64,
+    pub num_selected_executors: u8,
+}
+
 // App data struct containing the necessary fields to run the executor
 #[derive(Debug)]
 pub struct AppState {
