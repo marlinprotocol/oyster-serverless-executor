@@ -56,40 +56,31 @@ cargo build --release --target x86_64-unknown-linux-musl
 Usage: oyster-serverless-executor [OPTIONS]
 
 Options:
-      --port <PORT>
-          [default: 6001]
-          Server port
-      --workerd-runtime-path <WORKERD_RUNTIME_PATH>
-          [default: ./runtime/]
-          Runtime path where code and config files will be created and executed (workerd binary should be present here)
-      --common-chain-id <COMMON_CHAIN_ID>
-          Common chain id
-      --http-rpc-url <HTTP_RPC_URL>
-          Http url of the RPC endpoint
-      --web-socket-url <WEB_SOCKET_URL>
-          Websocket url of the RPC endpoint
-      --executors-contract-addr <EXECUTORS_CONTRACT_ADDR>
-          Executors smart contract address on common chain
-      --jobs-contract-addr <JOBS_CONTRACT_ADDR>
-          Jobs smart contract address on common chain
-      --code-contract-addr <CODE_CONTRACT_ADDR>
-          User code calldata smart contract address on common chain
-      --enclave-signer-file <ENCLAVE_SIGNER_FILE>
-          [default: ./id.sec]
-          path to enclave secp256k1 private key file
-      --execution-buffer-time <EXECUTION_BUFFER_TIME>
-          Execution buffer time as configured on common chain (in seconds)
-      --num-selected-executors <NUM_SELECTED_EXECUTORS>
-          Number of executors selected at a time to execute a job as configured on common chain
-
-  -h, --help
-          Print help
-  -V, --version
-          Print version
+      --port <PORT>                [default: 6001]
+        Server port
+      --config-file <CONFIG_FILE>  [default: ./oyster_serverless_executor_config.json]
+        Path to the executor configuration parameters file
+  -h, --help                       Print help
+  -V, --version                    Print version
 ```
+Configuration file parameters required for running an executor node:
+```
+{
+    "workerd_runtime_path": // Runtime path where code and config files will be created and executed (workerd binary should be present here),
+    "common_chain_id": // Common chain id,
+    "http_rpc_url": // Http url of the RPC endpoint,
+    "web_socket_url": // Websocket url of the RPC endpoint,
+    "executors_contract_addr": // Executors smart contract address on common chain,
+    "jobs_contract_addr": // Jobs smart contract address on common chain,
+    "code_contract_addr": // User code calldata smart contract address on common chain,
+    "enclave_signer_file": // path to enclave secp256k1 private key file,
+    "execution_buffer_time": // Execution buffer time as configured on common chain (in seconds),
+    "num_selected_executors": // Number of executors selected at a time to execute a job as configured on common chain
+}
+``` 
 Example command to run the executor locally:
 ```
-sudo ./target/x86_64-unknown-linux-musl/release/oyster-serverless-executor --signer ./path/to/signer
+sudo ./target/x86_64-unknown-linux-musl/release/oyster-serverless-executor --port 6001 --config-file ./oyster_serverless_executor_config.json
 ```
 
 <b> Inject immutable configuration parameters into the application: </b>

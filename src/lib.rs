@@ -1,4 +1,5 @@
 pub mod cgroups;
+pub mod config;
 pub mod event_handler;
 pub mod job_handler;
 pub mod node_handler;

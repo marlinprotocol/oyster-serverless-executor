@@ -19,6 +19,7 @@ path = "src/cgroups_retriever.rs"
 actix-web = "4"
 anyhow = "1.0.75"
 clap = { version = "4.4.7", features = ["derive"] }
+config = "0.14.0"
 data-encoding = "2.5.0"
 ethers = { version = "2.0.14", features = ["ws", "rustls"] }
 hex = "0.4.3"
