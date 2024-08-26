@@ -80,7 +80,7 @@ Configuration file parameters required for running an executor node:
 ``` 
 Example command to run the executor locally:
 ```
-sudo ./target/x86_64-unknown-linux-musl/release/oyster-serverless-executor --port 6001 --config-file /app/oyster_serverless_executor_config.json
+sudo ./target/x86_64-unknown-linux-musl/release/oyster-serverless-executor --port 6001 --config-file ./oyster_serverless_executor_config.json
 ```
 
 <b> Inject immutable configuration parameters into the application: </b>
