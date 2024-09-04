@@ -84,6 +84,7 @@ pub async fn handle_job(
                 id: job_id,
                 execution_response: execution_response,
                 sign_timestamp: sign_timestamp,
+                user_deadline: user_deadline.into(),
             }),
             timeout_response: None,
         })
@@ -223,7 +224,7 @@ fn sign_response(
     signer_key: &SigningKey,
     job_id: U256,
     output: &Bytes,
-    total_time: U256,
+    total_time: u128,
     error_code: u8,
     sign_timestamp: U256,
 ) -> Option<Vec<u8>> {
@@ -239,7 +240,7 @@ fn sign_response(
         Token::FixedBytes(submit_output_typehash.to_vec()),
         Token::Uint(job_id),
         Token::FixedBytes(keccak256(output).to_vec()),
-        Token::Uint(total_time),
+        Token::Uint(total_time.into()),
         Token::Uint(error_code.into()),
         Token::Uint(sign_timestamp),
     ]));

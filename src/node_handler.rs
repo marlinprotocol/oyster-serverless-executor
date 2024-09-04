@@ -86,7 +86,6 @@ async fn inject_mutable_config(
         ));
     };
     let gas_wallet = gas_wallet.with_chain_id(app_state.common_chain_id);
-    let gas_address = gas_wallet.address();
 
     // Connect the rpc http provider with the operator's gas wallet
     let http_rpc_client = Provider::<Http>::try_from(&app_state.http_rpc_url);
@@ -97,9 +96,7 @@ async fn inject_mutable_config(
             http_rpc_client.unwrap_err()
         ));
     };
-    let http_rpc_client = http_rpc_client
-        .with_signer(gas_wallet)
-        .nonce_manager(gas_address);
+    let http_rpc_client = http_rpc_client.with_signer(gas_wallet);
 
     // Initialize HTTP RPC client for sending signed transactions
     *app_state.http_rpc_client.lock().unwrap() = Some(Arc::new(http_rpc_client));
@@ -119,7 +116,6 @@ async fn get_executor_details(app_state: Data<AppState>) -> impl Responder {
             .unwrap()
             .clone()
             .unwrap()
-            .inner()
             .address();
     }
 

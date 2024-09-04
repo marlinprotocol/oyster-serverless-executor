@@ -18,7 +18,6 @@ pub mod serverless_executor_test {
     use actix_web::web::{Bytes, Data};
     use actix_web::{http, test, App, Error};
     use ethers::abi::{encode, encode_packed, Token};
-    use ethers::providers::Middleware;
     use ethers::types::{Address, BigEndianHash, Log, H160, H256, U256, U64};
     use ethers::utils::{keccak256, public_key_to_address};
     use k256::ecdsa::SigningKey;
@@ -265,7 +264,6 @@ pub mod serverless_executor_test {
                 .unwrap()
                 .clone()
                 .unwrap()
-                .inner()
                 .address(),
             public_key_to_address(gas_wallet_key.verifying_key())
         );
@@ -293,7 +291,6 @@ pub mod serverless_executor_test {
                 .unwrap()
                 .clone()
                 .unwrap()
-                .inner()
                 .address(),
             public_key_to_address(gas_wallet_key.verifying_key())
         );
@@ -416,7 +413,6 @@ pub mod serverless_executor_test {
                 .unwrap()
                 .clone()
                 .unwrap()
-                .inner()
                 .address(),
             public_key_to_address(gas_wallet_key.verifying_key())
         );
@@ -541,7 +537,6 @@ pub mod serverless_executor_test {
                 .unwrap()
                 .clone()
                 .unwrap()
-                .inner()
                 .address(),
             public_key_to_address(gas_wallet_key.verifying_key())
         );

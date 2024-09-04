@@ -1,22 +1,22 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use actix_web::web::Bytes;
-use anyhow::{anyhow, Context, Result};
-use ethers::contract::{abigen, FunctionCall};
-use ethers::middleware::{NonceManagerMiddleware, SignerMiddleware};
+use ethers::contract::abigen;
+use ethers::middleware::SignerMiddleware;
 use ethers::providers::{Http, Provider};
 use ethers::signers::LocalWallet;
-use ethers::types::{Address, TransactionReceipt, H160, U256};
+use ethers::types::{Address, H160, U256};
 use k256::ecdsa::SigningKey;
 use serde::{Deserialize, Serialize};
 
 use crate::cgroups::Cgroups;
 
-// Fixed buffer to add to the estimated gas for setting gas limit
-const GAS_LIMIT_BUFFER: u64 = 200000;
+pub const GAS_LIMIT_BUFFER: u64 = 200000; // Fixed buffer to add to the estimated gas for setting gas limit
+pub const TIMEOUT_TXN_RESEND_DEADLINE: u128 = 20; // Deadline (in secs) for resending pending/dropped execution timeout txns
+pub const RESEND_TXN_INTERVAL: u64 = 5; // Interval (in secs) in which to resend pending/dropped txns
+pub const RESEND_GAS_PRICE_INCREMENT_PERCENT: u64 = 10; // Gas price increment percent while resending pending/dropped txns
 
 // Generate type-safe ABI bindings for the Jobs contract at compile time
 abigen!(
@@ -25,7 +25,7 @@ abigen!(
     derives(serde::Serialize, serde::Deserialize)
 );
 
-pub type HttpSignerProvider = NonceManagerMiddleware<SignerMiddleware<Provider<Http>, LocalWallet>>;
+pub type HttpSignerProvider = SignerMiddleware<Provider<Http>, LocalWallet>;
 
 pub struct ConfigManager {
     pub path: String,
@@ -94,42 +94,12 @@ pub struct JobOutput {
     pub id: U256,
     pub execution_response: ExecutionResponse,
     pub sign_timestamp: U256,
+    pub user_deadline: u128,
 }
 
 #[derive(Debug, Clone)]
 pub struct ExecutionResponse {
     pub output: Bytes,
     pub error_code: u8,
-    pub total_time: U256,
-}
-
-// Send a signed transaction to the rpc network and report its confirmation or rejection
-pub async fn send_txn(
-    txn: FunctionCall<Arc<HttpSignerProvider>, HttpSignerProvider, ()>,
-) -> Result<TransactionReceipt> {
-    let estimated_gas = txn
-        .estimate_gas()
-        .await
-        .context("Failed to estimate gas from the rpc")?;
-    let txn = txn.gas(estimated_gas + GAS_LIMIT_BUFFER);
-
-    let pending_txn = txn
-        .send()
-        .await
-        .context("Failed to send the transaction to the network")?;
-
-    let txn_hash = pending_txn.tx_hash();
-    let Some(txn_receipt) = pending_txn
-        .confirmations(1)
-        .interval(Duration::from_millis(1000))
-        .await
-        .context("Failed to confirm the transaction")?
-    else {
-        return Err(anyhow!(
-            "Transaction with hash {:?} has been dropped from mempool!",
-            txn_hash
-        ));
-    };
-
-    Ok(txn_receipt)
+    pub total_time: u128,
 }
