@@ -1,20 +1,21 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use actix_web::web::Bytes;
-use ethers::contract::abigen;
+use ethers::contract::{abigen, FunctionCall};
 use ethers::middleware::SignerMiddleware;
 use ethers::providers::{Http, Provider};
 use ethers::signers::LocalWallet;
-use ethers::types::{Address, H160, U256};
+use ethers::types::{Address, H160, H256, U256};
 use k256::ecdsa::SigningKey;
 use serde::{Deserialize, Serialize};
 
 use crate::cgroups::Cgroups;
 
 pub const GAS_LIMIT_BUFFER: u64 = 200000; // Fixed buffer to add to the estimated gas for setting gas limit
-pub const TIMEOUT_TXN_RESEND_DEADLINE: u128 = 20; // Deadline (in secs) for resending pending/dropped execution timeout txns
+pub const TIMEOUT_TXN_RESEND_DEADLINE: u64 = 20; // Deadline (in secs) for resending pending/dropped execution timeout txns
 pub const RESEND_TXN_INTERVAL: u64 = 5; // Interval (in secs) in which to resend pending/dropped txns
 pub const RESEND_GAS_PRICE_INCREMENT_PERCENT: u64 = 10; // Gas price increment percent while resending pending/dropped txns
 
@@ -82,24 +83,44 @@ pub struct MutableConfig {
     pub gas_key_hex: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct JobResponse {
-    pub job_output: Option<JobOutput>,
-    pub timeout_response: Option<U256>,
+#[derive(Debug, Clone, PartialEq)]
+pub enum JobsTxnType {
+    OUTPUT,
+    TIMEOUT,
 }
 
-#[derive(Debug, Clone)]
+impl JobsTxnType {
+    pub fn as_str(&self) -> &str {
+        match self {
+            JobsTxnType::OUTPUT => "output",
+            JobsTxnType::TIMEOUT => "timeout",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct JobOutput {
-    pub signature: Bytes,
-    pub id: U256,
-    pub execution_response: ExecutionResponse,
-    pub sign_timestamp: U256,
-    pub user_deadline: u128,
-}
-
-#[derive(Debug, Clone)]
-pub struct ExecutionResponse {
     pub output: Bytes,
     pub error_code: u8,
     pub total_time: u128,
+    pub sign_timestamp: U256,
+    pub signature: Bytes,
+}
+
+#[derive(Debug, Clone)]
+pub struct JobsTxnMetadata {
+    pub txn_type: JobsTxnType,
+    pub job_id: U256,
+    pub job_output: Option<JobOutput>,
+    pub retry_deadline: Instant,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingTxnData {
+    pub txn_hash: H256,
+    pub txn_data: FunctionCall<Arc<HttpSignerProvider>, HttpSignerProvider, ()>,
+    pub nonce: U256,
+    pub gas_limit: U256,
+    pub gas_price: U256,
+    pub retry_deadline: Instant,
 }

@@ -36,7 +36,7 @@ pub mod serverless_executor_test {
         export_signed_registration_message, get_executor_details, index, inject_immutable_config,
         inject_mutable_config,
     };
-    use crate::utils::{AppState, JobResponse};
+    use crate::utils::{AppState, JobsTxnMetadata, JobsTxnType};
 
     // Testnet or Local blockchain (Hardhat) configurations
     const CHAIN_ID: u64 = 421614;
@@ -666,7 +666,7 @@ pub mod serverless_executor_test {
             ..Default::default()
         });
 
-        let (tx, mut rx) = channel::<JobResponse>(10);
+        let (tx, mut rx) = channel::<JobsTxnMetadata>(10);
 
         tokio::spawn(async move {
             // Introduce time interval between events to be polled
@@ -687,7 +687,7 @@ pub mod serverless_executor_test {
             .await;
         });
 
-        let mut responses: Vec<JobResponse> = vec![];
+        let mut responses: Vec<JobsTxnMetadata> = vec![];
 
         // Receive and store the responses
         while let Some(job_response) = rx.recv().await {
@@ -726,7 +726,7 @@ pub mod serverless_executor_test {
             },
         ];
 
-        let (tx, mut rx) = channel::<JobResponse>(10);
+        let (tx, mut rx) = channel::<JobsTxnMetadata>(10);
 
         tokio::spawn(async move {
             let jobs_stream = std::pin::pin!(tokio_stream::iter(job_logs.into_iter()).then(
@@ -746,7 +746,7 @@ pub mod serverless_executor_test {
             .await;
         });
 
-        let mut responses: Vec<JobResponse> = vec![];
+        let mut responses: Vec<JobsTxnMetadata> = vec![];
 
         // Receive and store the responses
         while let Some(job_response) = rx.recv().await {
@@ -805,7 +805,7 @@ pub mod serverless_executor_test {
             ..Default::default()
         });
 
-        let (tx, mut rx) = channel::<JobResponse>(10);
+        let (tx, mut rx) = channel::<JobsTxnMetadata>(10);
 
         tokio::spawn(async move {
             let jobs_stream = std::pin::pin!(tokio_stream::iter(job_logs.into_iter()).then(
@@ -825,7 +825,7 @@ pub mod serverless_executor_test {
             .await;
         });
 
-        let mut responses: Vec<JobResponse> = vec![];
+        let mut responses: Vec<JobsTxnMetadata> = vec![];
 
         // Receive and store the responses
         while let Some(job_response) = rx.recv().await {
@@ -864,7 +864,7 @@ pub mod serverless_executor_test {
             },
         ];
 
-        let (tx, mut rx) = channel::<JobResponse>(10);
+        let (tx, mut rx) = channel::<JobsTxnMetadata>(10);
 
         tokio::spawn(async move {
             let jobs_stream = std::pin::pin!(tokio_stream::iter(job_logs.into_iter()).then(
@@ -884,7 +884,7 @@ pub mod serverless_executor_test {
             .await;
         });
 
-        let mut responses: Vec<JobResponse> = vec![];
+        let mut responses: Vec<JobsTxnMetadata> = vec![];
 
         // Receive and store the responses
         while let Some(job_response) = rx.recv().await {
@@ -922,7 +922,7 @@ pub mod serverless_executor_test {
             },
         ];
 
-        let (tx, mut rx) = channel::<JobResponse>(10);
+        let (tx, mut rx) = channel::<JobsTxnMetadata>(10);
 
         tokio::spawn(async move {
             let jobs_stream = std::pin::pin!(tokio_stream::iter(job_logs.into_iter()).then(
@@ -942,7 +942,7 @@ pub mod serverless_executor_test {
             .await;
         });
 
-        let mut responses: Vec<JobResponse> = vec![];
+        let mut responses: Vec<JobsTxnMetadata> = vec![];
 
         // Receive and store the responses
         while let Some(job_response) = rx.recv().await {
@@ -980,7 +980,7 @@ pub mod serverless_executor_test {
             },
         ];
 
-        let (tx, mut rx) = channel::<JobResponse>(10);
+        let (tx, mut rx) = channel::<JobsTxnMetadata>(10);
 
         tokio::spawn(async move {
             let jobs_stream = std::pin::pin!(tokio_stream::iter(job_logs.into_iter()).then(
@@ -1000,7 +1000,7 @@ pub mod serverless_executor_test {
             .await;
         });
 
-        let mut responses: Vec<JobResponse> = vec![];
+        let mut responses: Vec<JobsTxnMetadata> = vec![];
 
         // Receive and store the responses
         while let Some(job_response) = rx.recv().await {
@@ -1038,7 +1038,7 @@ pub mod serverless_executor_test {
             },
         ];
 
-        let (tx, mut rx) = channel::<JobResponse>(10);
+        let (tx, mut rx) = channel::<JobsTxnMetadata>(10);
 
         tokio::spawn(async move {
             let jobs_stream = std::pin::pin!(tokio_stream::iter(job_logs.into_iter()).then(
@@ -1061,7 +1061,7 @@ pub mod serverless_executor_test {
             .await;
         });
 
-        let mut responses: Vec<JobResponse> = vec![];
+        let mut responses: Vec<JobsTxnMetadata> = vec![];
 
         // Receive and store the responses
         while let Some(job_response) = rx.recv().await {
@@ -1070,9 +1070,9 @@ pub mod serverless_executor_test {
 
         assert_eq!(responses.len(), 1);
         let job_response = responses[0].clone();
+        assert_eq!(job_response.txn_type, JobsTxnType::TIMEOUT);
+        assert_eq!(job_response.job_id, 0.into());
         assert!(job_response.job_output.is_none());
-        assert!(job_response.timeout_response.is_some());
-        assert_eq!(job_response.timeout_response.unwrap(), 0.into());
     }
 
     #[actix_web::test]
@@ -1081,7 +1081,7 @@ pub mod serverless_executor_test {
         let app_state = generate_app_state().await;
         app_state.enclave_registered.store(true, Ordering::SeqCst);
 
-        let (tx, mut rx) = channel::<JobResponse>(10);
+        let (tx, mut rx) = channel::<JobsTxnMetadata>(10);
 
         // Add log for deregistering the current executor
         let executor_logs = vec![Log {
@@ -1203,13 +1203,13 @@ pub mod serverless_executor_test {
         return recovered_key;
     }
 
-    fn assert_response(job_response: JobResponse, id: U256, error: u8, output: &str) {
+    fn assert_response(job_response: JobsTxnMetadata, id: U256, error: u8, output: &str) {
+        assert_eq!(job_response.txn_type, JobsTxnType::OUTPUT);
+        assert_eq!(job_response.job_id, id);
         assert!(job_response.job_output.is_some());
-        assert!(job_response.timeout_response.is_none());
         let job_output = job_response.job_output.unwrap();
 
-        assert_eq!(job_output.id, id);
-        assert_eq!(job_output.execution_response.error_code, error);
-        assert_eq!(job_output.execution_response.output, output);
+        assert_eq!(job_output.error_code, error);
+        assert_eq!(job_output.output, output);
     }
 }

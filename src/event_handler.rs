@@ -1,7 +1,9 @@
+use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use actix_web::cookie::time::Instant;
 use actix_web::web::Data;
 use ethers::abi::{decode, ParamType};
 use ethers::contract::FunctionCall;
@@ -17,8 +19,8 @@ use tokio_stream::Stream;
 use crate::job_handler::handle_job;
 use crate::timeout_handler::handle_timeout;
 use crate::utils::{
-    AppState, HttpSignerProvider, JobResponse, Jobs, GAS_LIMIT_BUFFER,
-    RESEND_GAS_PRICE_INCREMENT_PERCENT, RESEND_TXN_INTERVAL, TIMEOUT_TXN_RESEND_DEADLINE,
+    AppState, HttpSignerProvider, Jobs, JobsTxnMetadata, JobsTxnType, PendingTxnData,
+    GAS_LIMIT_BUFFER, RESEND_GAS_PRICE_INCREMENT_PERCENT, RESEND_TXN_INTERVAL,
 };
 
 // Start listening to Job requests emitted by the Jobs contract if enclave is registered else listen for Executor registered events first
@@ -132,21 +134,26 @@ pub async fn events_listener(app_state: Data<AppState>, starting_block: U64) {
         let executors_stream = std::pin::pin!(executors_stream);
 
         // Initialize nonce for sending job execution transactions via the injected gas account
-        let http_rpc_client = app_state.http_rpc_client.lock().unwrap().clone().unwrap();
-        let nonce_to_send = http_rpc_client
-            .get_transaction_count(http_rpc_client.address(), None)
-            .await;
-        let Ok(nonce_to_send) = nonce_to_send else {
-            eprintln!(
-                "Failed to fetch current nonce for the gas address ({:?}): {:?}",
-                http_rpc_client.address(),
-                nonce_to_send.unwrap_err()
-            );
-            continue;
+        let nonce_to_send = loop {
+            let http_rpc_client = app_state.http_rpc_client.lock().unwrap().clone().unwrap();
+            let current_nonce = http_rpc_client
+                .get_transaction_count(http_rpc_client.address(), None)
+                .await;
+
+            let Ok(current_nonce) = current_nonce else {
+                eprintln!(
+                    "Failed to fetch current nonce for the gas address ({:?}): {:?}",
+                    http_rpc_client.address(),
+                    current_nonce.unwrap_err()
+                );
+                continue;
+            };
+
+            break current_nonce;
         };
 
         // Create tokio mpsc channel to receive contract events and send transactions to them
-        let (tx, rx) = channel::<JobResponse>(100);
+        let (tx, rx) = channel::<JobsTxnMetadata>(100);
         let app_state_clone = app_state.clone();
 
         tokio::spawn(async move {
@@ -164,63 +171,55 @@ pub async fn events_listener(app_state: Data<AppState>, starting_block: U64) {
 async fn send_execution_output(
     mut nonce_to_send: U256,
     app_state: Data<AppState>,
-    mut rx: Receiver<JobResponse>,
+    mut rx: Receiver<JobsTxnMetadata>,
 ) {
+    let pending_txns: Arc<Mutex<VecDeque<PendingTxnData>>> = Arc::new(VecDeque::new().into());
+
+    // Monitor the transactions sent for block confirmation
+    let app_state_clone = app_state.clone();
+    let pending_txns_clone = pending_txns.clone();
+    tokio::spawn(async move {
+        resend_pending_transaction(app_state_clone, pending_txns_clone).await;
+    });
+
     while let Some(job_response) = rx.recv().await {
-        let mut txn: Option<FunctionCall<Arc<HttpSignerProvider>, HttpSignerProvider, ()>> = None;
-        let mut resend_deadline = TIMEOUT_TXN_RESEND_DEADLINE;
-        let mut txn_type = "timeout";
-        let mut job_id: U256 = 0.into();
+        // Initialize the txn object to send based on the txn type
+        let jobs_txn: FunctionCall<Arc<HttpSignerProvider>, HttpSignerProvider, ()> =
+            match job_response.txn_type {
+                JobsTxnType::OUTPUT => {
+                    let job_output = job_response.job_output.clone().unwrap();
 
-        if job_response.job_output.is_some() {
-            let job_output = job_response.job_output.unwrap();
-
-            // Assign details of job execution output transaction
-            txn = Some(
-                Jobs::new(
+                    Jobs::new(
+                        app_state.jobs_contract_addr,
+                        app_state.http_rpc_client.lock().unwrap().clone().unwrap(),
+                    )
+                    .submit_output(
+                        job_output.signature.into(),
+                        job_response.job_id,
+                        job_output.output.into(),
+                        job_output.total_time.into(),
+                        job_output.error_code.into(),
+                        job_output.sign_timestamp,
+                    )
+                }
+                JobsTxnType::TIMEOUT => Jobs::new(
                     app_state.jobs_contract_addr,
                     app_state.http_rpc_client.lock().unwrap().clone().unwrap(),
                 )
-                .submit_output(
-                    job_output.signature.clone().into(),
-                    job_output.id,
-                    job_output.execution_response.output.clone().into(),
-                    job_output.execution_response.total_time.into(),
-                    job_output.execution_response.error_code.into(),
-                    job_output.sign_timestamp,
-                ),
-            );
-            resend_deadline = (app_state.execution_buffer_time as u128) + job_output.user_deadline
-                - job_output.execution_response.total_time;
-            txn_type = "output";
-            job_id = job_output.id;
-        } else if job_response.timeout_response.is_some() {
-            // Assign details of job execution timeout transaction
-            job_id = job_response.timeout_response.unwrap();
-            txn = Some(
-                Jobs::new(
-                    app_state.jobs_contract_addr,
-                    app_state.http_rpc_client.lock().unwrap().clone().unwrap(),
-                )
-                .slash_on_execution_timeout(job_id),
-            );
-        }
-
-        if txn.is_none() {
-            continue;
-        }
+                .slash_on_execution_timeout(job_response.job_id),
+            };
 
         let mut update_nonce = false;
-        let job_txn = txn.unwrap();
 
-        // Retry loop for sending a transaction to the common chain
-        for _retry in 0..3 {
-            let txn = job_txn.clone();
+        // Retry loop for sending the transaction to the common chain 'Jobs' contract
+        while Instant::now() < job_response.retry_deadline {
+            let txn = jobs_txn.clone();
 
             // Estimate gas required for the transaction to execute and retry otherwise
             let estimated_gas = txn.estimate_gas().await;
             let Ok(estimated_gas) = estimated_gas else {
-                eprintln!("Failed to estimate gas from the rpc for sending execution {} transaction for job id {}: {:?}", txn_type, job_id, estimated_gas.unwrap_err());
+                eprintln!("Failed to estimate gas from the rpc for sending execution {} transaction for job id {}: {:?}", 
+                    job_response.txn_type.as_str(), job_response.job_id, estimated_gas.unwrap_err());
                 sleep(Duration::from_millis(10)).await;
                 continue;
             };
@@ -250,6 +249,7 @@ async fn send_execution_output(
                     );
                     continue;
                 };
+
                 nonce_to_send = new_nonce_to_send.unwrap();
                 update_nonce = false;
             }
@@ -264,43 +264,50 @@ async fn send_execution_output(
                 let error_string = format!("{:?}", pending_txn.unwrap_err());
                 eprintln!(
                     "Failed to send the execution {} transaction for job id {}: {}",
-                    txn_type, job_id, error_string
+                    job_response.txn_type.as_str(),
+                    job_response.job_id,
+                    error_string
                 );
 
-                // Retry if 'nonce too low' error encountered
-                if error_string.contains("code: -32000") && error_string.contains("nonce") {
+                // Retry if 'nonce too low' error encountered with the current nonce for the gas account
+                if error_string.contains("code: -32000") && error_string.contains("nonce too low") {
                     update_nonce = true;
                     continue;
                 }
 
-                // Retry after a delay if connection failed
-                if error_string.contains("code: -32000") && error_string.contains("connection") {
-                    sleep(Duration::from_millis(100)).await;
+                // Retry after a delay if 'nonce too high' error encountered so that the previous transactions can be mined
+                if error_string.contains("code: -32000") && error_string.contains("nonce too high")
+                {
+                    sleep(Duration::from_millis(500)).await;
                     continue;
                 }
 
+                // Retry after a delay if connection failed
+                if error_string.contains("code: -32000")
+                    && (error_string.contains("connection") || error_string.contains("network"))
+                {
+                    sleep(Duration::from_millis(200)).await;
+                    continue;
+                }
+
+                // Break if any other error encountered like "insufficient funds" or "execution reverted" or "contract execution failed"
                 break;
             };
 
             let pending_tx_hash = pending_txn.tx_hash();
             println!(
                 "Execution {} transaction successfully sent for job id {} with nonce {} and hash {:?}",
-                txn_type, job_id, nonce_to_send, pending_tx_hash
+                job_response.txn_type.as_str(), job_response.job_id, nonce_to_send, pending_tx_hash
             );
 
-            // Monitor the transaction sent for block confirmation
-            let app_state_clone = app_state.clone();
-            tokio::spawn(async move {
-                resend_pending_transaction(
-                    app_state_clone,
-                    job_txn,
-                    pending_tx_hash,
-                    nonce_to_send,
-                    estimated_gas + GAS_LIMIT_BUFFER,
-                    gas_price,
-                    resend_deadline,
-                )
-                .await;
+            // Add the current sent txn to the pending txns list
+            pending_txns.lock().unwrap().push_back(PendingTxnData {
+                txn_hash: pending_tx_hash,
+                txn_data: jobs_txn,
+                nonce: nonce_to_send,
+                gas_limit: estimated_gas + GAS_LIMIT_BUFFER,
+                gas_price: gas_price,
+                retry_deadline: job_response.retry_deadline,
             });
 
             // Increment nonce for the next transaction to send
@@ -318,7 +325,7 @@ pub async fn handle_event_logs(
     mut jobs_stream: impl Stream<Item = Log> + Unpin,
     mut executors_stream: impl Stream<Item = Log> + Unpin,
     app_state: Data<AppState>,
-    tx: Sender<JobResponse>,
+    tx: Sender<JobsTxnMetadata>,
 ) {
     println!("Started listening to job events!");
 
@@ -504,63 +511,148 @@ pub async fn handle_event_logs(
 // Function to regularly check a transaction for block confirmation and resend it if not included
 async fn resend_pending_transaction(
     app_state: Data<AppState>,
-    txn: FunctionCall<Arc<HttpSignerProvider>, HttpSignerProvider, ()>,
-    mut pending_txn_hash: H256,
-    nonce: U256,
-    mut gas_limit: U256,
-    mut gas_price: U256,
-    resend_deadline: u128,
+    pending_txns: Arc<Mutex<VecDeque<PendingTxnData>>>,
 ) {
-    // Calculating resend retries number based on the overall deadline and interval in which to resend pending/dropped txns
-    let mut resend_retries = resend_deadline / (RESEND_TXN_INTERVAL as u128);
-    while resend_retries > 0 {
-        sleep(Duration::from_secs(RESEND_TXN_INTERVAL)).await;
-
-        // Get the transaction receipt for the pending transaction to check if it's still pending or been dropped
-        let http_rpc_client = app_state.http_rpc_client.lock().unwrap().clone().unwrap();
-        let Ok(txn_receipt) = http_rpc_client
-            .get_transaction_receipt(pending_txn_hash)
-            .await
-        else {
-            resend_retries -= 1;
+    loop {
+        if pending_txns.lock().unwrap().is_empty() {
+            sleep(Duration::from_millis(200)).await;
             continue;
-        };
-
-        if txn_receipt.is_some() {
-            break;
         }
 
-        // Update gas limit and price for sending the replacement transaction with the original nonce
-        gas_limit += GAS_LIMIT_BUFFER.into();
-        gas_price += (U256::from(RESEND_GAS_PRICE_INCREMENT_PERCENT) * gas_price) / 100;
+        let mut pending_txn_data = pending_txns.lock().unwrap().pop_front().unwrap();
+        let mut retry_txn = true;
 
-        // Update replacement transaction metadata and send it to the common chain, stop resending if failed to do so once
-        let replacement_txn = txn.clone();
-        let replacement_txn = replacement_txn
-            .nonce(nonce)
-            .gas(gas_limit)
-            .gas_price(gas_price);
-        let Ok(pending_txn) = replacement_txn.send().await else {
-            resend_retries = 0;
-            break;
-        };
+        while Instant::now() < pending_txn_data.retry_deadline && retry_txn == true {
+            sleep(Duration::from_secs(RESEND_TXN_INTERVAL)).await;
 
-        pending_txn_hash = pending_txn.tx_hash();
-        resend_retries -= 1;
-    }
+            // Get the transaction receipt for the pending transaction to check if it's still pending or been dropped
+            let http_rpc_client = app_state.http_rpc_client.lock().unwrap().clone().unwrap();
+            let Ok(txn_receipt) = http_rpc_client
+                .get_transaction_receipt(pending_txn_data.txn_hash)
+                .await
+            else {
+                continue;
+            };
 
-    // If the original transaction fails to get included in the common chain, send a dummy transaction that is confirmed to be included and will replace the original nonce transaction
-    if resend_retries == 0 {
-        // Increasing gas price so that the current transaction can replace the original in the mempool
-        gas_price += (U256::from(RESEND_GAS_PRICE_INCREMENT_PERCENT) * gas_price) / 100;
-        let http_rpc_client = app_state.http_rpc_client.lock().unwrap().clone().unwrap();
+            // Transaction is confirmed/mined and need not be resent
+            if txn_receipt.is_some() {
+                retry_txn = false;
+                break;
+            }
 
-        // Send 0 ETH to self from the gas account as a confirmed replacement transaction
-        let dummy_replacement_txn = TransactionRequest::pay(http_rpc_client.address(), 0u64)
-            .nonce(nonce)
-            .gas_price(gas_price);
-        let _ = http_rpc_client
-            .send_transaction(dummy_replacement_txn, None)
-            .await;
+            // Current txn is dropped/lost and need to be resent with higher gas price
+            pending_txn_data.gas_limit = pending_txn_data.gas_limit + GAS_LIMIT_BUFFER;
+            pending_txn_data.gas_price = U256::from(100 + RESEND_GAS_PRICE_INCREMENT_PERCENT)
+                * pending_txn_data.gas_price
+                / 100;
+
+            // Send the replacement txn if the current one is dropped or lost
+            while Instant::now() < pending_txn_data.retry_deadline {
+                let replacement_txn = pending_txn_data.txn_data.clone();
+                let replacement_txn = replacement_txn
+                    .nonce(pending_txn_data.nonce)
+                    .gas_price(pending_txn_data.gas_price)
+                    .gas(pending_txn_data.gas_limit);
+
+                let pending_txn = replacement_txn.send().await;
+                let Ok(pending_txn) = pending_txn else {
+                    let error_string = format!("{:?}", pending_txn.unwrap_err());
+
+                    // Retry after a delay if connection failed
+                    if error_string.contains("code: -32000")
+                        && (error_string.contains("connection") || error_string.contains("network"))
+                    {
+                        sleep(Duration::from_millis(200)).await;
+                        continue;
+                    }
+
+                    // Retry with a higher gas price if the replacement txn is underpriced
+                    if error_string.contains("code: -32000")
+                        && (error_string.contains("replacement transaction underpriced")
+                            || error_string.contains("transaction underpriced"))
+                    {
+                        pending_txn_data.gas_price =
+                            U256::from(100 + RESEND_GAS_PRICE_INCREMENT_PERCENT)
+                                * pending_txn_data.gas_price
+                                / 100;
+
+                        sleep(Duration::from_millis(10)).await;
+                        continue;
+                    }
+
+                    // Break in case of other errors like "nonce too low" or "execution reverted" or "insufficient funds" etc.
+                    retry_txn = false;
+                    break;
+                };
+
+                // Monitor the newly sent pending txn
+                pending_txn_data.txn_hash = pending_txn.tx_hash();
+                break;
+            }
+        }
+
+        while retry_txn == true {
+            // Increment the gas price for the dummy transaction that'll replace the existing pending/dropped txn
+            pending_txn_data.gas_price = U256::from(100 + RESEND_GAS_PRICE_INCREMENT_PERCENT)
+                * pending_txn_data.gas_price
+                / 100;
+
+            loop {
+                let http_rpc_client = app_state.http_rpc_client.lock().unwrap().clone().unwrap();
+
+                // Send 0 ETH to self as a dummy replacement txn for the current nonce
+                let dummy_replacement_txn =
+                    TransactionRequest::pay(http_rpc_client.address(), 0u64)
+                        .nonce(pending_txn_data.nonce)
+                        .gas_price(pending_txn_data.gas_price);
+
+                let pending_txn = http_rpc_client
+                    .send_transaction(dummy_replacement_txn, None)
+                    .await;
+                let Ok(pending_txn) = pending_txn else {
+                    let error_string = format!("{:?}", pending_txn.unwrap_err());
+
+                    // Retry after a delay if connection failed
+                    if error_string.contains("code: -32000")
+                        && (error_string.contains("connection") || error_string.contains("network"))
+                    {
+                        sleep(Duration::from_millis(200)).await;
+                        continue;
+                    }
+
+                    // Retry with a higher gas price if the replacement txn is underpriced
+                    if error_string.contains("code: -32000")
+                        && (error_string.contains("replacement transaction underpriced")
+                            || error_string.contains("transaction underpriced"))
+                    {
+                        pending_txn_data.gas_price =
+                            U256::from(100 + RESEND_GAS_PRICE_INCREMENT_PERCENT)
+                                * pending_txn_data.gas_price
+                                / 100;
+
+                        sleep(Duration::from_millis(10)).await;
+                        continue;
+                    }
+
+                    // Break in case of other errors like "nonce too low" or "execution reverted" or "insufficient funds" etc.
+                    retry_txn = false;
+                    break;
+                };
+
+                // Wait for confirmation of the sent txn
+                let Ok(Some(_)) = pending_txn
+                    .confirmations(1)
+                    .interval(Duration::from_secs(1))
+                    .await
+                else {
+                    // Retry if the txn is not confirmed
+                    break;
+                };
+
+                // Break if the txn is successfully confirmed
+                retry_txn = false;
+                break;
+            }
+        }
     }
 }
