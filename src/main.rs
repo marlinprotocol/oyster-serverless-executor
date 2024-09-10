@@ -4,7 +4,7 @@ use actix_web::web::Data;
 use actix_web::{App, HttpServer};
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use ethers::types::H160;
+use ethers::types::{H160, U256};
 use ethers::utils::public_key_to_address;
 use k256::ecdsa::SigningKey;
 use tokio::fs;
@@ -80,6 +80,7 @@ async fn main() -> Result<()> {
         http_rpc_client: None.into(),
         job_requests_running: HashSet::new().into(),
         last_block_seen: 0.into(),
+        nonce_to_send: U256::from(0).into(),
     });
 
     // Start actix server to expose the executor outside the enclave

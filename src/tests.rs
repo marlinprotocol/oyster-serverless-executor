@@ -73,6 +73,7 @@ pub mod serverless_executor_test {
             http_rpc_client: None.into(),
             job_requests_running: HashSet::new().into(),
             last_block_seen: 0.into(),
+            nonce_to_send: U256::from(0).into(),
         })
     }
 

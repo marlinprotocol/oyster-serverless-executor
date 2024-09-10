@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use actix_web::web::{Data, Json};
@@ -8,6 +7,8 @@ use ethers::prelude::*;
 use ethers::utils::keccak256;
 use k256::elliptic_curve::generic_array::sequence::Lengthen;
 use serde_json::json;
+use tokio_retry::strategy::{jitter, ExponentialBackoff};
+use tokio_retry::Retry;
 
 use crate::event_handler::events_listener;
 use crate::utils::{AppState, ImmutableConfig, MutableConfig};
@@ -58,8 +59,6 @@ async fn inject_mutable_config(
     Json(mutable_config): Json<MutableConfig>,
     app_state: Data<AppState>,
 ) -> impl Responder {
-    let mut mutable_params_injected_guard = app_state.mutable_params_injected.lock().unwrap();
-
     let bytes32_gas_key = hex::decode(
         &mutable_config
             .gas_key_hex
@@ -98,8 +97,27 @@ async fn inject_mutable_config(
     };
     let http_rpc_client = http_rpc_client.with_signer(gas_wallet);
 
-    // Initialize HTTP RPC client for sending signed transactions
-    *app_state.http_rpc_client.lock().unwrap() = Some(Arc::new(http_rpc_client));
+    // Fetch current nonce for the injected gas address from the rpc
+    let nonce_to_send = Retry::spawn(
+        ExponentialBackoff::from_millis(5).map(jitter).take(3),
+        || async {
+            http_rpc_client
+                .get_transaction_count(http_rpc_client.address(), None)
+                .await
+        },
+    )
+    .await;
+    let Ok(nonce_to_send) = nonce_to_send else {
+        return HttpResponse::InternalServerError().body(format!(
+            "Failed to fetch current nonce for the gas address: {:?}\n",
+            nonce_to_send.unwrap_err()
+        ));
+    };
+
+    // Initialize HTTP RPC client and nonce for sending the signed transactions while holding lock
+    let mut mutable_params_injected_guard = app_state.mutable_params_injected.lock().unwrap();
+    *app_state.nonce_to_send.lock().unwrap() = nonce_to_send;
+    *app_state.http_rpc_client.lock().unwrap() = Some(http_rpc_client);
     *mutable_params_injected_guard = true;
 
     HttpResponse::Ok().body("Mutable params configured!\n")

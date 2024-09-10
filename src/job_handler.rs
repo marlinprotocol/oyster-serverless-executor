@@ -90,7 +90,8 @@ pub async fn handle_job(
                 sign_timestamp: sign_timestamp,
                 signature: signature.into(),
             }),
-            retry_deadline: Instant::now()                         // The submit output transaction will be invalidated after this deadline by the 'Jobs' contract  
+            // The submit output transaction will be invalidated after this deadline by the 'Jobs' contract
+            retry_deadline: Instant::now()
                 + Duration::from_secs(
                     app_state.execution_buffer_time + user_deadline
                         - (job_output.total_time as u64),
