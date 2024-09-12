@@ -10,7 +10,7 @@ use ethers::middleware::SignerMiddleware;
 use ethers::providers::{Http, Middleware, Provider};
 use ethers::signers::LocalWallet;
 use ethers::types::transaction::eip2718::TypedTransaction;
-use ethers::types::{Address, TransactionRequest, H160, H256, U256};
+use ethers::types::{Address, Eip1559TransactionRequest, H160, H256, U256};
 use k256::ecdsa::SigningKey;
 use serde::{Deserialize, Serialize};
 use serde_json::from_str;
@@ -139,7 +139,7 @@ pub enum JobsTxnSendError {
 
 // Returns the 'Jobs' Contract Abi object for encoding transaction data, takes the JSON ABI from 'Jobs.json' file
 pub fn load_abi_from_file() -> Result<Abi> {
-    let abi_json = include_str!("Jobs.json");
+    let abi_json = include_str!("../Jobs.json");
     let contract: Abi = from_str(&abi_json)
         .context("Failed to deserialize 'Jobs' contract ABI from the Json file Jobs.json")?;
 
@@ -151,7 +151,7 @@ pub fn generate_txn(
     jobs_contract_abi: &Abi,
     jobs_contract_addr: Address,
     job_response: &JobsTxnMetadata,
-) -> Result<TransactionRequest> {
+) -> Result<TypedTransaction> {
     let txn_data = match job_response.txn_type {
         JobsTxnType::OUTPUT => {
             let job_output = job_response.job_output.clone().unwrap();
@@ -180,18 +180,18 @@ pub fn generate_txn(
     };
 
     // Return the TransactionRequest object using the encoded data and 'Jobs' contract address
-    Ok(TransactionRequest {
+    Ok(TypedTransaction::Eip1559(Eip1559TransactionRequest {
         to: Some(jobs_contract_addr.into()),
         data: Some(txn_data.into()),
         ..Default::default()
-    })
+    }))
 }
 
 // Function to retrieve the estimated gas required for a txn and the current gas price
 // of the network under the retry deadline for the txn, returns `(estimated_gas, gas_price)`
 pub async fn estimate_gas_and_price(
     http_rpc_client: HttpSignerProvider,
-    txn: &TransactionRequest,
+    txn: &TypedTransaction,
     deadline: Instant,
 ) -> Option<(U256, U256)> {
     let mut gas_price = U256::zero();
@@ -219,9 +219,7 @@ pub async fn estimate_gas_and_price(
 
     while Instant::now() < deadline {
         // Estimate the gas required for the TransactionRequest from the rpc, retry otherwise
-        let estimated_gas = http_rpc_client
-            .estimate_gas(&TypedTransaction::Legacy(txn.to_owned()), None)
-            .await;
+        let estimated_gas = http_rpc_client.estimate_gas(txn, None).await;
         let Ok(estimated_gas) = estimated_gas else {
             let error_string = format!("{:?}", estimated_gas.unwrap_err());
             eprintln!(

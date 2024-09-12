@@ -13,6 +13,8 @@ use scopeguard::defer;
 use tokio::select;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::time::sleep;
+use tokio_retry::strategy::{jitter, ExponentialBackoff};
+use tokio_retry::Retry;
 use tokio_stream::Stream;
 
 use crate::job_handler::handle_job;
@@ -182,7 +184,7 @@ async fn send_execution_output(
         while Instant::now() < job_response.retry_deadline {
             // Initialize the signer rpc client being used for sending the transaction in this retry loop
             let http_rpc_client = app_state.http_rpc_client.lock().unwrap().clone().unwrap();
-            let txn = jobs_txn.clone();
+            let mut txn = jobs_txn.clone();
 
             // If required retrieve the current nonce from the network and retry otherwise
             if update_nonce == true {
@@ -210,10 +212,11 @@ async fn send_execution_output(
 
             // Update metadata to be used for sending the transaction and send it to the common chain
             let txn = txn
-                .from(http_rpc_client.address())
-                .nonce(current_nonce)
-                .gas(gas_limit)
-                .gas_price(gas_price);
+                .set_from(http_rpc_client.address())
+                .set_nonce(current_nonce)
+                .set_gas(gas_limit)
+                .set_gas_price(gas_price)
+                .to_owned();
             let pending_txn = http_rpc_client.send_transaction(txn, None).await;
             let Ok(pending_txn) = pending_txn else {
                 let error_string = format!("{:?}", pending_txn.unwrap_err());
@@ -498,52 +501,64 @@ async fn resend_pending_transaction(
 
         let mut pending_txn_data = pending_txn_data.unwrap();
 
-        // Wait for some time for the pending txn to be mined before resending
-        sleep(Duration::from_secs(
-            RESEND_TXN_INTERVAL
-                - min(
-                    RESEND_TXN_INTERVAL,
-                    pending_txn_data.last_monitor_instant.elapsed().as_secs(),
-                ),
-        ))
+        // Calculate the interval to wait before checking for block confirmation of the pending txn and resending accordingly
+        let resend_interval = RESEND_TXN_INTERVAL
+            - min(
+                RESEND_TXN_INTERVAL,
+                pending_txn_data.last_monitor_instant.elapsed().as_secs(),
+            );
+
+        // Wait for the interval estimated, keeping track of the txn retry deadline as well
+        sleep(Duration::from_secs(min(
+            resend_interval,
+            pending_txn_data
+                .txn_data
+                .retry_deadline
+                .duration_since(Instant::now())
+                .as_secs(),
+        )))
         .await;
 
         // Get the transaction receipt for the pending transaction to check if it's still pending or been dropped
-        let Ok(txn_receipt) = pending_txn_data
-            .http_rpc_client
-            .get_transaction_receipt(pending_txn_data.txn_hash)
-            .await
-        else {
-            // Continue if failed to retrieve transaction receipt from the rpc
-            pending_txn_data.last_monitor_instant = Instant::now();
-            pending_txns.lock().unwrap().push_front(pending_txn_data);
-            continue;
-        };
-
-        // Transaction is confirmed/mined and need not be resent
-        if txn_receipt.is_some() {
+        if Retry::spawn(
+            ExponentialBackoff::from_millis(5).map(jitter).take(3),
+            || async {
+                pending_txn_data
+                    .http_rpc_client
+                    .get_transaction_receipt(pending_txn_data.txn_hash)
+                    .await
+            },
+        )
+        .await
+        .is_ok_and(|receipt| receipt.is_some())
+        {
+            // Continue the outer loop if the txn has been mined and confirmed
             continue;
         }
 
+        // Current pending txn needs to be resent now since it still can't be confirmed and the further txns are blocked
+
+        // Flag to keep track of whether there is a need to send dummy txn or not
+        let mut send_dummy = true;
         // Increment the gas limit and price for the replacement txn to be accepted
         pending_txn_data.gas_limit = pending_txn_data.gas_limit + GAS_LIMIT_BUFFER;
         pending_txn_data.gas_price =
             U256::from(100 + RESEND_GAS_PRICE_INCREMENT_PERCENT) * pending_txn_data.gas_price / 100;
 
-        // Current pending txn is dropped/lost and need to be resent again within the specified deadline
         while Instant::now() < pending_txn_data.txn_data.retry_deadline {
             // Initialize the pending transaction data and update its metadata accordingly
-            let replacement_txn = generate_txn(
+            let mut replacement_txn = generate_txn(
                 &app_state.jobs_contract_abi,
                 app_state.jobs_contract_addr,
                 &pending_txn_data.txn_data,
             )
             .unwrap();
             let replacement_txn = replacement_txn
-                .from(pending_txn_data.http_rpc_client.address())
-                .nonce(pending_txn_data.nonce)
-                .gas(pending_txn_data.gas_limit)
-                .gas_price(pending_txn_data.gas_price);
+                .set_from(pending_txn_data.http_rpc_client.address())
+                .set_nonce(pending_txn_data.nonce)
+                .set_gas(pending_txn_data.gas_limit)
+                .set_gas_price(pending_txn_data.gas_price)
+                .to_owned();
 
             // Send the replacement transaction for the current nonce
             let pending_txn = pending_txn_data
@@ -557,6 +572,7 @@ async fn resend_pending_transaction(
                 match parse_send_error(error_string.to_lowercase()) {
                     JobsTxnSendError::NonceTooLow => {
                         // Current nonce is already mined and need not be resent now
+                        send_dummy = false;
                         break;
                     }
                     JobsTxnSendError::OutOfGas => {
@@ -586,11 +602,13 @@ async fn resend_pending_transaction(
                 .lock()
                 .unwrap()
                 .push_front(pending_txn_data.clone());
+
+            send_dummy = false;
             break;
         }
 
         // Continue in case the replacement txn was sent successfully or the original pending txn was mined
-        if Instant::now() < pending_txn_data.txn_data.retry_deadline {
+        if send_dummy == false {
             continue;
         }
 
