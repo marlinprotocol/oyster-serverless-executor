@@ -32,11 +32,8 @@ pub mod serverless_executor_test {
 
     use crate::cgroups::Cgroups;
     use crate::event_handler::handle_event_logs;
-    use crate::node_handler::{
-        export_signed_registration_message, get_executor_details, index, inject_immutable_config,
-        inject_mutable_config,
-    };
-    use crate::utils::{AppState, JobsTxnMetadata, JobsTxnType};
+    use crate::node_handler::*;
+    use crate::utils::{load_abi_from_file, AppState, JobsTxnMetadata, JobsTxnType};
 
     // Testnet or Local blockchain (Hardhat) configurations
     const CHAIN_ID: u64 = 421614;
@@ -74,6 +71,7 @@ pub mod serverless_executor_test {
             job_requests_running: HashSet::new().into(),
             last_block_seen: 0.into(),
             nonce_to_send: U256::from(0).into(),
+            jobs_contract_abi: load_abi_from_file().unwrap(),
         })
     }
 

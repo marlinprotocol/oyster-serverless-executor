@@ -1,3 +1,4 @@
+use std::cmp::min;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -160,9 +161,14 @@ async fn send_execution_output(
 ) {
     while let Some(job_response) = rx.recv().await {
         // Initialize the txn object to send based on the txn type
-        let jobs_txn = generate_txn(app_state.clone(), &job_response);
+        let jobs_txn = generate_txn(
+            &app_state.jobs_contract_abi,
+            app_state.jobs_contract_addr,
+            &job_response,
+        )
+        .unwrap();
 
-        // Initialize retry metadata like gas price, gas limit and need to update the nonce from the rpc
+        // Initialize retry metadata like gas price, gas limit and the need to update the nonce from the rpc
         let mut update_nonce = false;
         let http_rpc_client = app_state.http_rpc_client.lock().unwrap().clone().unwrap();
         let Some((mut gas_limit, mut gas_price)) =
@@ -176,7 +182,7 @@ async fn send_execution_output(
         while Instant::now() < job_response.retry_deadline {
             // Initialize the signer rpc client being used for sending the transaction in this retry loop
             let http_rpc_client = app_state.http_rpc_client.lock().unwrap().clone().unwrap();
-            let mut txn = jobs_txn.clone();
+            let txn = jobs_txn.clone();
 
             // If required retrieve the current nonce from the network and retry otherwise
             if update_nonce == true {
@@ -190,7 +196,7 @@ async fn send_execution_output(
                         new_nonce_to_send.unwrap_err()
                     );
 
-                    sleep(Duration::from_millis(10)).await;
+                    sleep(Duration::from_millis(HTTP_CALL_RETRY_DELAY)).await;
                     continue;
                 };
 
@@ -204,11 +210,10 @@ async fn send_execution_output(
 
             // Update metadata to be used for sending the transaction and send it to the common chain
             let txn = txn
-                .set_from(http_rpc_client.address())
-                .set_nonce(current_nonce)
-                .set_gas(gas_limit)
-                .set_gas_price(gas_price)
-                .to_owned();
+                .from(http_rpc_client.address())
+                .nonce(current_nonce)
+                .gas(gas_limit)
+                .gas_price(gas_price);
             let pending_txn = http_rpc_client.send_transaction(txn, None).await;
             let Ok(pending_txn) = pending_txn else {
                 let error_string = format!("{:?}", pending_txn.unwrap_err());
@@ -257,6 +262,7 @@ async fn send_execution_output(
                 nonce: current_nonce,
                 gas_limit: gas_limit,
                 gas_price: gas_price,
+                last_monitor_instant: Instant::now(),
             });
 
             // Increment nonce for the next transaction to send
@@ -464,93 +470,127 @@ async fn resend_pending_transaction(
     tx_sender: Sender<JobsTxnMetadata>,
 ) {
     loop {
-        // Get the first pending txn from the queue (with the least nonce) and focus on unblocking this nonce
-        let Some(mut pending_txn_data) = pending_txns.lock().unwrap().pop_front() else {
+        // Get the currently injected gas address in the executor
+        let current_gas_address = app_state
+            .http_rpc_client
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap()
+            .address();
+        let mut pending_txn_data = pending_txns.lock().unwrap().pop_front();
+
+        // Pop and send the pending txns with old gas account to the main 'Jobs' txn sender for resending with consistent nonce
+        while pending_txn_data.is_some() {
+            if pending_txn_data.clone().unwrap().http_rpc_client.address() == current_gas_address {
+                break;
+            }
+
+            let _ = tx_sender.send(pending_txn_data.unwrap().txn_data).await;
+            pending_txn_data = pending_txns.lock().unwrap().pop_front();
+        }
+
+        // Continue if the pending txns deque is empty
+        if pending_txn_data.is_none() {
             sleep(Duration::from_millis(200)).await;
             continue;
         };
 
-        let mut resend_txn = true;
+        let mut pending_txn_data = pending_txn_data.unwrap();
 
-        while Instant::now() < pending_txn_data.txn_data.retry_deadline {
-            sleep(Duration::from_secs(RESEND_TXN_INTERVAL)).await;
+        // Wait for some time for the pending txn to be mined before resending
+        sleep(Duration::from_secs(
+            RESEND_TXN_INTERVAL
+                - min(
+                    RESEND_TXN_INTERVAL,
+                    pending_txn_data.last_monitor_instant.elapsed().as_secs(),
+                ),
+        ))
+        .await;
 
-            // Get the transaction receipt for the pending transaction to check if it's still pending or been dropped
-            let Ok(txn_receipt) = pending_txn_data
-                .http_rpc_client
-                .get_transaction_receipt(pending_txn_data.txn_hash)
-                .await
-            else {
-                // Continue if failed to retrieve transaction receipt from the rpc
-                continue;
-            };
+        // Get the transaction receipt for the pending transaction to check if it's still pending or been dropped
+        let Ok(txn_receipt) = pending_txn_data
+            .http_rpc_client
+            .get_transaction_receipt(pending_txn_data.txn_hash)
+            .await
+        else {
+            // Continue if failed to retrieve transaction receipt from the rpc
+            pending_txn_data.last_monitor_instant = Instant::now();
+            pending_txns.lock().unwrap().push_front(pending_txn_data);
+            continue;
+        };
 
-            // Transaction is confirmed/mined and need not be resent
-            if txn_receipt.is_some() {
-                resend_txn = false;
-                break;
-            }
-
-            // Current pending txn is dropped/lost and need to be resent again within the specified deadline
-            while Instant::now() < pending_txn_data.txn_data.retry_deadline {
-                // Initialize the pending transaction data and update its metadata accordingly
-                let mut replacement_txn =
-                    generate_txn(app_state.clone(), &pending_txn_data.txn_data);
-                let replacement_txn = replacement_txn
-                    .set_from(pending_txn_data.http_rpc_client.address())
-                    .set_nonce(pending_txn_data.nonce)
-                    .set_gas(pending_txn_data.gas_limit)
-                    .set_gas_price(pending_txn_data.gas_price)
-                    .to_owned();
-
-                // Send the replacement transaction for the current nonce
-                let pending_txn = pending_txn_data
-                    .http_rpc_client
-                    .send_transaction(replacement_txn, None)
-                    .await;
-                let Ok(pending_txn) = pending_txn else {
-                    let error_string = format!("{:?}", pending_txn.unwrap_err());
-
-                    // Handle retry logic based on the error enum value
-                    match parse_send_error(error_string.to_lowercase()) {
-                        JobsTxnSendError::NonceTooLow => {
-                            // Current nonce is already mined and need not be resent now
-                            resend_txn = false;
-                            break;
-                        }
-                        JobsTxnSendError::OutOfGas => {
-                            pending_txn_data.gas_limit =
-                                pending_txn_data.gas_limit + GAS_LIMIT_BUFFER;
-                            continue;
-                        }
-                        JobsTxnSendError::GasPriceLow => {
-                            pending_txn_data.gas_price =
-                                U256::from(100 + RESEND_GAS_PRICE_INCREMENT_PERCENT)
-                                    * pending_txn_data.gas_price
-                                    / 100;
-                            continue;
-                        }
-                        // Just to be on the safer side, though very less likely to occur because the same txn has been sent successfully once
-                        JobsTxnSendError::GasTooHigh | JobsTxnSendError::ContractExecution => break,
-                        _ => {
-                            sleep(Duration::from_millis(200)).await;
-                            continue;
-                        }
-                    }
-                };
-
-                // Monitor the newly sent pending txn
-                pending_txn_data.txn_hash = pending_txn.tx_hash();
-                break;
-            }
-
-            if resend_txn == false {
-                break;
-            }
+        // Transaction is confirmed/mined and need not be resent
+        if txn_receipt.is_some() {
+            continue;
         }
 
-        // Proceed to the next pending txn in the queue if the current nonce has been resolved or mined
-        if resend_txn == false {
+        // Increment the gas limit and price for the replacement txn to be accepted
+        pending_txn_data.gas_limit = pending_txn_data.gas_limit + GAS_LIMIT_BUFFER;
+        pending_txn_data.gas_price =
+            U256::from(100 + RESEND_GAS_PRICE_INCREMENT_PERCENT) * pending_txn_data.gas_price / 100;
+
+        // Current pending txn is dropped/lost and need to be resent again within the specified deadline
+        while Instant::now() < pending_txn_data.txn_data.retry_deadline {
+            // Initialize the pending transaction data and update its metadata accordingly
+            let replacement_txn = generate_txn(
+                &app_state.jobs_contract_abi,
+                app_state.jobs_contract_addr,
+                &pending_txn_data.txn_data,
+            )
+            .unwrap();
+            let replacement_txn = replacement_txn
+                .from(pending_txn_data.http_rpc_client.address())
+                .nonce(pending_txn_data.nonce)
+                .gas(pending_txn_data.gas_limit)
+                .gas_price(pending_txn_data.gas_price);
+
+            // Send the replacement transaction for the current nonce
+            let pending_txn = pending_txn_data
+                .http_rpc_client
+                .send_transaction(replacement_txn, None)
+                .await;
+            let Ok(pending_txn) = pending_txn else {
+                let error_string = format!("{:?}", pending_txn.unwrap_err());
+
+                // Handle retry logic based on the error enum value
+                match parse_send_error(error_string.to_lowercase()) {
+                    JobsTxnSendError::NonceTooLow => {
+                        // Current nonce is already mined and need not be resent now
+                        break;
+                    }
+                    JobsTxnSendError::OutOfGas => {
+                        pending_txn_data.gas_limit = pending_txn_data.gas_limit + GAS_LIMIT_BUFFER;
+                        continue;
+                    }
+                    JobsTxnSendError::GasPriceLow => {
+                        pending_txn_data.gas_price =
+                            U256::from(100 + RESEND_GAS_PRICE_INCREMENT_PERCENT)
+                                * pending_txn_data.gas_price
+                                / 100;
+                        continue;
+                    }
+                    // Just to be on the safer side, though very less likely to occur because the same txn has been sent successfully once
+                    JobsTxnSendError::GasTooHigh | JobsTxnSendError::ContractExecution => break,
+                    _ => {
+                        sleep(Duration::from_millis(200)).await;
+                        continue;
+                    }
+                }
+            };
+
+            // Monitor the newly sent pending txn
+            pending_txn_data.txn_hash = pending_txn.tx_hash();
+            pending_txn_data.last_monitor_instant = Instant::now();
+            pending_txns
+                .lock()
+                .unwrap()
+                .push_front(pending_txn_data.clone());
+            break;
+        }
+
+        // Continue in case the replacement txn was sent successfully or the original pending txn was mined
+        if Instant::now() < pending_txn_data.txn_data.retry_deadline {
             continue;
         }
 
@@ -577,6 +617,18 @@ async fn resend_pending_transaction(
                     "Failed to send the dummy replacement txn for the nonce {}: {}",
                     pending_txn_data.nonce, error_string
                 );
+
+                // Check if the gas account has been updated and therefore no need to unblock the current nonce for the old gas address
+                let current_gas_address = app_state
+                    .http_rpc_client
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap()
+                    .address();
+                if current_gas_address != pending_txn_data.http_rpc_client.address() {
+                    break;
+                }
 
                 // Handle retry logic for the dummy txn
                 match parse_send_error(error_string.to_lowercase()) {
@@ -608,35 +660,18 @@ async fn resend_pending_transaction(
                 .interval(Duration::from_secs(1))
                 .await
             else {
-                // If even this simple dummy txn fails to be mined then check whether the operator has injected a new gas account to send the txns
-                if pending_txn_data.http_rpc_client.address()
-                    != app_state
-                        .http_rpc_client
-                        .lock()
-                        .unwrap()
-                        .clone()
-                        .unwrap()
-                        .address()
-                {
-                    // Since the current nonce is not getting resolved for the old gas account,
-                    // send the remaining pending txns having the old gas account to the transaction sender
-                    // channel again for resending with proper nonce handling
-                    while !pending_txns.lock().unwrap().is_empty() {
-                        let txn = pending_txns.lock().unwrap().pop_front().unwrap();
-
-                        if txn.http_rpc_client.address()
-                            == pending_txn_data.http_rpc_client.address()
-                        {
-                            let _ = tx_sender.send(txn.txn_data).await;
-                        } else {
-                            pending_txns.lock().unwrap().push_front(txn);
-                            break;
-                        }
-                    }
-
-                    // Break the loop for the current nonce and wait for future pending txns with the new gas account
+                // Check if the gas account has been updated and therefore no need to unblock the current nonce for the old gas address
+                let current_gas_address = app_state
+                    .http_rpc_client
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap()
+                    .address();
+                if current_gas_address != pending_txn_data.http_rpc_client.address() {
                     break;
                 }
+
                 // Retry if the txn is not confirmed
                 continue;
             };

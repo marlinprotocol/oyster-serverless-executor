@@ -1,0 +1,53 @@
+[
+  {
+    "inputs": [
+      {
+        "internalType": "bytes",
+        "name": "_signature",
+        "type": "bytes"
+      },
+      {
+        "internalType": "uint256",
+        "name": "_jobId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "bytes",
+        "name": "_output",
+        "type": "bytes"
+      },
+      {
+        "internalType": "uint256",
+        "name": "_totalTime",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint8",
+        "name": "_errorCode",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint256",
+        "name": "_signTimestamp",
+        "type": "uint256"
+      }
+    ],
+    "name": "submitOutput",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "_jobId",
+        "type": "uint256"
+      }
+    ],
+    "name": "slashOnExecutionTimeout",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  }
+]

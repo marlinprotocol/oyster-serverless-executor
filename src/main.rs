@@ -10,11 +10,8 @@ use k256::ecdsa::SigningKey;
 use tokio::fs;
 
 use serverless::cgroups::Cgroups;
-use serverless::node_handler::{
-    export_signed_registration_message, get_executor_details, index, inject_immutable_config,
-    inject_mutable_config,
-};
-use serverless::utils::{AppState, ConfigManager};
+use serverless::node_handler::*;
+use serverless::utils::{load_abi_from_file, AppState, ConfigManager};
 
 // EXECUTOR CONFIGURATION PARAMETERS
 #[derive(Parser, Debug)]
@@ -81,6 +78,7 @@ async fn main() -> Result<()> {
         job_requests_running: HashSet::new().into(),
         last_block_seen: 0.into(),
         nonce_to_send: U256::from(0).into(),
+        jobs_contract_abi: load_abi_from_file()?,
     });
 
     // Start actix server to expose the executor outside the enclave
