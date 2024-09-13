@@ -473,33 +473,11 @@ async fn resend_pending_transaction(
     tx_sender: Sender<JobsTxnMetadata>,
 ) {
     loop {
-        // Get the currently injected gas address in the executor
-        let current_gas_address = app_state
-            .http_rpc_client
-            .lock()
-            .unwrap()
-            .clone()
-            .unwrap()
-            .address();
-        let mut pending_txn_data = pending_txns.lock().unwrap().pop_front();
-
-        // Pop and send the pending txns with old gas account to the main 'Jobs' txn sender for resending with consistent nonce
-        while pending_txn_data.is_some() {
-            if pending_txn_data.clone().unwrap().http_rpc_client.address() == current_gas_address {
-                break;
-            }
-
-            let _ = tx_sender.send(pending_txn_data.unwrap().txn_data).await;
-            pending_txn_data = pending_txns.lock().unwrap().pop_front();
-        }
-
-        // Continue if the pending txns deque is empty
-        if pending_txn_data.is_none() {
+        let Some(mut pending_txn_data) = pending_txns.lock().unwrap().pop_front() else {
+            // Continue if the pending txns deque is empty
             sleep(Duration::from_millis(200)).await;
             continue;
         };
-
-        let mut pending_txn_data = pending_txn_data.unwrap();
 
         // Calculate the interval to wait before checking for block confirmation of the pending txn and resending accordingly
         let resend_interval = RESEND_TXN_INTERVAL
@@ -553,6 +531,23 @@ async fn resend_pending_transaction(
                 &pending_txn_data.txn_data,
             )
             .unwrap();
+
+            // Check if the gas account has been updated and therefore send the replacement transaction to the main sender
+            let current_gas_address = app_state
+                .http_rpc_client
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap()
+                .address();
+            if current_gas_address != pending_txn_data.http_rpc_client.address() {
+                send_dummy = false;
+                let Ok(_) = tx_sender.send(pending_txn_data.txn_data.clone()).await else {
+                    continue;
+                };
+                break;
+            }
+
             let replacement_txn = replacement_txn
                 .set_from(pending_txn_data.http_rpc_client.address())
                 .set_nonce(pending_txn_data.nonce)
@@ -618,6 +613,18 @@ async fn resend_pending_transaction(
 
         // If the current nonce has still not been resolved for the 'Jobs' txn within the deadline then send a dummy txn to unblock it
         loop {
+            // Check if the gas account has been updated and therefore no need to unblock the current nonce for the old gas address
+            let current_gas_address = app_state
+                .http_rpc_client
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap()
+                .address();
+            if current_gas_address != pending_txn_data.http_rpc_client.address() {
+                break;
+            }
+
             // Send 0 ETH to self as a dummy replacement txn for the current nonce
             let dummy_replacement_txn =
                 TransactionRequest::pay(pending_txn_data.http_rpc_client.address(), 0u64)
@@ -635,18 +642,6 @@ async fn resend_pending_transaction(
                     "Failed to send the dummy replacement txn for the nonce {}: {}",
                     pending_txn_data.nonce, error_string
                 );
-
-                // Check if the gas account has been updated and therefore no need to unblock the current nonce for the old gas address
-                let current_gas_address = app_state
-                    .http_rpc_client
-                    .lock()
-                    .unwrap()
-                    .clone()
-                    .unwrap()
-                    .address();
-                if current_gas_address != pending_txn_data.http_rpc_client.address() {
-                    break;
-                }
 
                 // Handle retry logic for the dummy txn
                 match parse_send_error(error_string.to_lowercase()) {
@@ -678,18 +673,6 @@ async fn resend_pending_transaction(
                 .interval(Duration::from_secs(1))
                 .await
             else {
-                // Check if the gas account has been updated and therefore no need to unblock the current nonce for the old gas address
-                let current_gas_address = app_state
-                    .http_rpc_client
-                    .lock()
-                    .unwrap()
-                    .clone()
-                    .unwrap()
-                    .address();
-                if current_gas_address != pending_txn_data.http_rpc_client.address() {
-                    break;
-                }
-
                 // Retry if the txn is not confirmed
                 continue;
             };
