@@ -13,7 +13,7 @@ use scopeguard::defer;
 use tokio::sync::mpsc::Sender;
 use tokio::time::timeout;
 
-use crate::utils::{AppState, ExecutionResponse, JobOutput, JobResponse};
+use crate::utils::{AppState, JobOutput, JobsTxnMetadata, JobsTxnType};
 use crate::workerd;
 use crate::workerd::ServerlessError::*;
 
@@ -30,7 +30,7 @@ pub async fn handle_job(
     code_inputs: Bytes,
     user_deadline: u64, // time in millis
     app_state: Data<AppState>,
-    tx: Sender<JobResponse>,
+    tx: Sender<JobsTxnMetadata>,
 ) {
     let slug = &hex::encode(rand::random::<u32>().to_ne_bytes());
 
@@ -46,16 +46,17 @@ pub async fn handle_job(
     let _ = workerd::cleanup_code_file(&code_hash, slug, &app_state.workerd_runtime_path).await;
 
     // Initialize the default timeout response and build on that based on the above response
-    let mut execution_response = Some(ExecutionResponse {
+    let mut job_output = Some(JobOutput {
         output: Bytes::new(),
         error_code: 4,
         total_time: user_deadline.into(),
+        ..Default::default()
     });
     if response.is_ok() {
-        execution_response = response.unwrap();
+        job_output = response.unwrap();
     }
 
-    let Some(execution_response) = execution_response else {
+    let Some(job_output) = job_output else {
         return;
     };
 
@@ -69,23 +70,32 @@ pub async fn handle_job(
     let Some(signature) = sign_response(
         &app_state.enclave_signer,
         job_id,
-        &execution_response.output,
-        execution_response.total_time,
-        execution_response.error_code,
+        &job_output.output,
+        job_output.total_time,
+        job_output.error_code,
         sign_timestamp,
     ) else {
         return;
     };
 
+    // Send the job response metadata to the receiver channel
     if let Err(err) = tx
-        .send(JobResponse {
+        .send(JobsTxnMetadata {
+            txn_type: JobsTxnType::OUTPUT,
+            job_id: job_id,
             job_output: Some(JobOutput {
-                signature: signature.into(),
-                id: job_id,
-                execution_response: execution_response,
+                output: job_output.output,
+                error_code: job_output.error_code,
+                total_time: job_output.total_time,
                 sign_timestamp: sign_timestamp,
+                signature: signature.into(),
             }),
-            timeout_response: None,
+            // The submit output transaction will be invalidated after this deadline by the 'Jobs' contract
+            retry_deadline: Instant::now()
+                + Duration::from_secs(
+                    app_state.execution_buffer_time + user_deadline
+                        - (job_output.total_time as u64),
+                ),
         })
         .await
     {
@@ -103,7 +113,7 @@ async fn execute_job(
     code_inputs: Bytes,
     slug: &String,
     app_state: Data<AppState>,
-) -> Option<ExecutionResponse> {
+) -> Option<JobOutput> {
     let execution_timer_start = Instant::now();
 
     // Create the code file in the desired location
@@ -117,18 +127,20 @@ async fn execute_job(
     .await
     {
         return match err {
-            TxNotFound | InvalidTxToType | InvalidTxToValue(_, _) => Some(ExecutionResponse {
+            TxNotFound | InvalidTxToType | InvalidTxToValue(_, _) => Some(JobOutput {
                 output: Bytes::new(),
                 error_code: 1,
                 total_time: execution_timer_start.elapsed().as_millis().into(),
+                ..Default::default()
             }),
             InvalidTxCalldata
             | InvalidTxCalldataType
             | InvalidTxCalldataLength
-            | BadCalldata(_) => Some(ExecutionResponse {
+            | BadCalldata(_) => Some(JobOutput {
                 output: Bytes::new(),
                 error_code: 2,
                 total_time: execution_timer_start.elapsed().as_millis().into(),
+                ..Default::default()
             }),
             _ => None,
         };
@@ -195,10 +207,11 @@ async fn execute_job(
 
         // Check if there was a syntax error in the user code
         if stderr_output != "" && stderr_output.contains("SyntaxError") {
-            return Some(ExecutionResponse {
+            return Some(JobOutput {
                 output: Bytes::new(),
                 error_code: 3,
                 total_time: execution_timer_start.elapsed().as_millis().into(),
+                ..Default::default()
             });
         }
 
@@ -211,10 +224,11 @@ async fn execute_job(
         return None;
     };
 
-    Some(ExecutionResponse {
+    Some(JobOutput {
         output: response,
         error_code: 0,
         total_time: execution_timer_start.elapsed().as_millis().into(),
+        ..Default::default()
     })
 }
 
@@ -223,7 +237,7 @@ fn sign_response(
     signer_key: &SigningKey,
     job_id: U256,
     output: &Bytes,
-    total_time: U256,
+    total_time: u128,
     error_code: u8,
     sign_timestamp: U256,
 ) -> Option<Vec<u8>> {
@@ -239,7 +253,7 @@ fn sign_response(
         Token::FixedBytes(submit_output_typehash.to_vec()),
         Token::Uint(job_id),
         Token::FixedBytes(keccak256(output).to_vec()),
-        Token::Uint(total_time),
+        Token::Uint(total_time.into()),
         Token::Uint(error_code.into()),
         Token::Uint(sign_timestamp),
     ]));
