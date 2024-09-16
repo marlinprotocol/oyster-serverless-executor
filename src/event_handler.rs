@@ -45,7 +45,7 @@ pub async fn events_listener(app_state: Data<AppState>, starting_block: U64) {
             let register_executor_filter = Filter::new()
                 .address(app_state.executors_contract_addr)
                 .topic0(H256::from(keccak256(
-                    "ExecutorRegistered(address,address,uint256)",
+                    "ExecutorRegistered(address,address,uint256,uint8)",
                 )))
                 .topic1(H256::from(app_state.enclave_address))
                 .topic2(H256::from(*app_state.enclave_owner.lock().unwrap()))
@@ -90,7 +90,7 @@ pub async fn events_listener(app_state: Data<AppState>, starting_block: U64) {
         let jobs_event_filter = Filter::new()
             .address(app_state.jobs_contract_addr)
             .topic0(vec![
-                keccak256("JobCreated(uint256,address,bytes32,bytes,uint256,address[])"),
+                keccak256("JobCreated(uint256,uint8,address,bytes32,bytes,uint256,address[])"),
                 keccak256("JobResponded(uint256,bytes,uint256,uint8,uint8)"),
             ])
             .from_block(app_state.last_block_seen.load(Ordering::SeqCst));
@@ -317,11 +317,16 @@ pub async fn handle_event_logs(
 
                 // Capture the Job created event emitted by the jobs contract
                 if event.topics[0]
-                    == keccak256("JobCreated(uint256,address,bytes32,bytes,uint256,address[])")
+                    == keccak256("JobCreated(uint256,uint8,address,bytes32,bytes,uint256,address[])")
                     .into()
                 {
                     // Extract the 'indexed' parameter of the event
                     let job_id = event.topics[1].into_uint();
+                    let env = event.topics[2].into_uint();
+
+                    if env != EXECUTION_ENV_ID.into() {
+                        continue;
+                    }
 
                     // Decode the event parameters using the ABI information
                     let event_tokens = decode(

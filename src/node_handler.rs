@@ -11,7 +11,7 @@ use tokio_retry::strategy::{jitter, ExponentialBackoff};
 use tokio_retry::Retry;
 
 use crate::event_handler::events_listener;
-use crate::utils::{AppState, ImmutableConfig, MutableConfig};
+use crate::utils::{AppState, ImmutableConfig, MutableConfig, EXECUTION_ENV_ID};
 
 #[get("/")]
 async fn index() -> impl Responder {
@@ -170,12 +170,13 @@ async fn export_signed_registration_message(app_state: Data<AppState>) -> impl R
         Token::FixedBytes(keccak256("1").to_vec()),
     ]));
     let register_typehash =
-        keccak256("Register(address owner,uint256 jobCapacity,uint256 signTimestamp)");
+        keccak256("Register(address owner,uint256 jobCapacity,uint8 env,uint256 signTimestamp)");
 
     let hash_struct = keccak256(encode(&[
         Token::FixedBytes(register_typehash.to_vec()),
         Token::Address(owner),
         Token::Uint(job_capacity.into()),
+        Token::Uint(EXECUTION_ENV_ID.into()),
         Token::Uint(sign_timestamp.into()),
     ]));
 
@@ -223,7 +224,8 @@ async fn export_signed_registration_message(app_state: Data<AppState>) -> impl R
     HttpResponse::Ok().json(json!({
         "job_capacity": job_capacity,
         "sign_timestamp": sign_timestamp,
+        "env": EXECUTION_ENV_ID,
         "owner": owner,
-        "signature": signature,
+        "signature": format!("0x{}", signature),
     }))
 }
