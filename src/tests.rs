@@ -33,7 +33,9 @@ pub mod serverless_executor_test {
     use crate::cgroups::Cgroups;
     use crate::event_handler::handle_event_logs;
     use crate::node_handler::*;
-    use crate::utils::{load_abi_from_file, AppState, JobsTxnMetadata, JobsTxnType};
+    use crate::utils::{
+        load_abi_from_file, AppState, JobsTxnMetadata, JobsTxnType, EXECUTION_ENV_ID,
+    };
 
     // Testnet or Local blockchain (Hardhat) configurations
     const CHAIN_ID: u64 = 421614;
@@ -556,7 +558,7 @@ pub mod serverless_executor_test {
         let response = response.unwrap();
         assert_eq!(response.job_capacity, 20);
         assert_eq!(response.owner, valid_owner);
-        assert_eq!(response.signature.len(), 130);
+        assert_eq!(response.signature.len(), 132);
         assert_eq!(
             recover_key(
                 response.owner,
@@ -585,7 +587,7 @@ pub mod serverless_executor_test {
         let response = response.unwrap();
         assert_eq!(response.job_capacity, 20);
         assert_eq!(response.owner, valid_owner);
-        assert_eq!(response.signature.len(), 130);
+        assert_eq!(response.signature.len(), 132);
         assert_eq!(
             recover_key(
                 response.owner,
@@ -1130,8 +1132,10 @@ pub mod serverless_executor_test {
             block_number: Some(block_number),
             address: H160::from_str(JOBS_CONTRACT_ADDR).unwrap(),
             topics: vec![
-                keccak256("JobCreated(uint256,address,bytes32,bytes,uint256,address[])").into(),
+                keccak256("JobCreated(uint256,uint8,address,bytes32,bytes,uint256,address[])")
+                    .into(),
                 H256::from_uint(&job_id),
+                H256::from_uint(&EXECUTION_ENV_ID.into()),
                 H256::from(H160::random()),
             ],
             data: encode(&[
@@ -1178,12 +1182,14 @@ pub mod serverless_executor_test {
             Token::FixedBytes(keccak256("marlin.oyster.Executors").to_vec()),
             Token::FixedBytes(keccak256("1").to_vec()),
         ]));
-        let register_typehash =
-            keccak256("Register(address owner,uint256 jobCapacity,uint256 signTimestamp)");
+        let register_typehash = keccak256(
+            "Register(address owner,uint256 jobCapacity,uint8 env,uint256 signTimestamp)",
+        );
         let hash_struct = keccak256(encode(&[
             Token::FixedBytes(register_typehash.to_vec()),
             Token::Address(owner),
             Token::Uint(job_capacity.into()),
+            Token::Uint(EXECUTION_ENV_ID.into()),
             Token::Uint(sign_timestamp.into()),
         ]));
         let digest = encode_packed(&[
@@ -1195,8 +1201,8 @@ pub mod serverless_executor_test {
         let digest = keccak256(digest);
 
         let signature =
-            Signature::from_slice(hex::decode(&sign[0..128]).unwrap().as_slice()).unwrap();
-        let v = RecoveryId::try_from((hex::decode(&sign[128..]).unwrap()[0]) - 27).unwrap();
+            Signature::from_slice(hex::decode(&sign[2..130]).unwrap().as_slice()).unwrap();
+        let v = RecoveryId::try_from((hex::decode(&sign[130..]).unwrap()[0]) - 27).unwrap();
         let recovered_key = VerifyingKey::recover_from_prehash(&digest, &signature, v).unwrap();
 
         return recovered_key;
