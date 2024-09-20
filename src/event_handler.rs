@@ -101,9 +101,8 @@ pub async fn events_listener(app_state: Data<AppState>, starting_block: U64) {
             Ok(stream) => stream,
             Err(err) => {
                 eprintln!(
-                    "Failed to subscribe to Jobs ({:?}) contract 'JobCreated' and 'JobResponded' event logs: {:?}",
-                    app_state.jobs_contract_addr,
-                    err,
+                    "Failed to subscribe to Jobs ({:?}) contract 'JobCreated' event logs: {:?}",
+                    app_state.jobs_contract_addr, err,
                 );
                 continue;
             }
@@ -114,7 +113,7 @@ pub async fn events_listener(app_state: Data<AppState>, starting_block: U64) {
         let jobs_responded_filter = Filter::new()
             .address(app_state.jobs_contract_addr)
             .topic0(H256::from(keccak256(
-                "JobResponded(uint256,bytes,uint256,uint8,uint8)",
+                "JobResponded(uint256,address,bytes,uint256,uint8,uint8)",
             )))
             .from_block(app_state.last_block_seen.load(Ordering::SeqCst));
         // Subscribe to the filter through the rpc web socket client
@@ -125,9 +124,8 @@ pub async fn events_listener(app_state: Data<AppState>, starting_block: U64) {
             Ok(stream) => stream,
             Err(err) => {
                 eprintln!(
-                    "Failed to subscribe to Jobs ({:?}) contract 'JobCreated' and 'JobResponded' event logs: {:?}",
-                    app_state.jobs_contract_addr,
-                    err,
+                    "Failed to subscribe to Jobs ({:?}) contract 'JobResponded' event logs: {:?}",
+                    app_state.jobs_contract_addr, err,
                 );
                 continue;
             }
@@ -362,10 +360,10 @@ pub async fn handle_event_logs(
                 // Decode the event parameters using the ABI information
                 let event_tokens = decode(
                     &vec![
-                    ParamType::FixedBytes(32),
-                    ParamType::Bytes,
-                    ParamType::Uint(256),
-                    ParamType::Array(Box::new(ParamType::Address)),
+                        ParamType::FixedBytes(32),
+                        ParamType::Bytes,
+                        ParamType::Uint(256),
+                        ParamType::Array(Box::new(ParamType::Address)),
                     ],
                     &event.data.to_vec(),
                 );
@@ -471,10 +469,10 @@ pub async fn handle_event_logs(
                 // Decode the event parameters using the ABI information
                 let event_tokens = decode(
                     &vec![
-                    ParamType::Bytes,
-                    ParamType::Uint(256),
-                    ParamType::Uint(8),
-                    ParamType::Uint(8),
+                        ParamType::Bytes,
+                        ParamType::Uint(256),
+                        ParamType::Uint(8),
+                        ParamType::Uint(8),
                     ],
                     &event.data.to_vec(),
                 );
